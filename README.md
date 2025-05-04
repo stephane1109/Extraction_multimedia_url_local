@@ -18,17 +18,6 @@ pip install streamlit yt-dlp
 
 > **Remarque** : les modules `os`, `subprocess`, `re` et `glob` font partie de la bibliothèque standard Python.
 
-## Imports dans le script
-
-```python
-# ---------------- Imports ----------------
-import streamlit as st
-import os
-import subprocess
-import re
-import glob
-from yt_dlp import YoutubeDL
-```
 
 ## Structure du script
 
