@@ -21,12 +21,7 @@ pip install streamlit yt-dlp
 
 ## Structure du script
 
-1. **Entrée vidéo** :
-
-   * `st.text_input` pour l’URL YouTube
-   * `st.file_uploader` pour un fichier local MP4
-   * `st.file_uploader` pour un fichier `cookies.txt` (optionnel)
-2. **Compression vidéo** :
+1. **Compression vidéo** :
 
    * Appel à `ffmpeg` via `subprocess` pour :
 
@@ -34,27 +29,17 @@ pip install streamlit yt-dlp
      * encoder la vidéo avec CRF=28
      * encoder l’audio en AAC à 96 kbps
    * Résultat stocké dans `ressources_globale`
-3. **Extraction par intervalle** :
+     
+2. **Extraction par intervalle** :
 
    * L’utilisateur définit un intervalle (*start*, *end*)
-   * Extraction de ressources (audio, images, sous-titres…) via des expressions régulières et `glob`
+   * Extraction de ressources (mp4, audio mp3 et wav, images 1fps ou 25fps)
    * Stockage dans `ressources_intervalle`
-
-### Variables clés
-
-```python
-url = st.text_input("Entrez l'URL de la vidéo YouTube :")
-fichier_local = st.file_uploader("Ou importez un fichier vidéo (.mp4)", type=["mp4"])
-cookies_file = st.file_uploader("Uploader votre fichier cookies.txt (optionnel)", type=["txt"])
-
-repertoire_globale = os.path.abspath("ressources_globale")
-repertoire_intervalle = os.path.abspath("ressources_intervalle")
-```
 
 ## Fonctionnalités principales
 
-* **Téléchargement YouTube** : téléchargement d’une vidéo via `yt_dlp.YoutubeDL`, avec prise en charge facultative d’un fichier de cookies pour les contenus privés.
-* **Import local** : chargement d’un fichier MP4 depuis l’ordinateur.
+* **Téléchargement YouTube** : téléchargement d’une vidéo via `yt_dlp.YoutubeDL`, avec prise en charge facultative d’un fichier de cookies.
+* **Import local** : chargement d’un fichier mp4 depuis l’ordinateur.
 * **Compression vidéo** : exécution d’une commande `ffmpeg` adaptée aux paramètres suivants :
 
   * largeur maximale : **1280 px**
@@ -73,5 +58,3 @@ streamlit run nom_du_script.py
 L’interface Streamlit s’ouvrira automatiquement dans votre navigateur.
 
 ---
-
-> Pour toute question ou suggestion, ouvrez une issue ou contactez l’
