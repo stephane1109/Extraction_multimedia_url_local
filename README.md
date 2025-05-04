@@ -55,6 +55,4 @@ Dans votre terminal, lancez :
 streamlit run nom_du_script.py
 ```
 
-L’interface Streamlit s’ouvrira automatiquement dans votre navigateur.
-
 ---
