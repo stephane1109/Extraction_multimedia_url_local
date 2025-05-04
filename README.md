@@ -1,10 +1,8 @@
 # README
 
-##
-########
-# Extraction posts and comments Reddit - en local
-# wwww.codeandcortex.fr
-########
+Extraction d'un vidéo Youtube ou depuis un fichier mp4 local
+wwww.codeandcortex.fr
+
 
 ## Préambule
 
