@@ -1,7 +1,6 @@
 # README
 
-Extraction d'un vidéo Youtube ou depuis un fichier mp4 local
-wwww.codeandcortex.fr
+Extraction d'un vidéo Youtube ou depuis un fichier mp4 local : wwww.codeandcortex.fr
 
 
 ## Préambule
@@ -14,7 +13,7 @@ Ce README décrit les dépendances et les fonctionnalités du script Streamlit d
 
 ## Installation des dépendances Python
 
-Dans un terminal, exécutez :
+Dans votre terminal de votre editeur de code, exécutez :
 
 ```bash
 pip install streamlit yt-dlp
