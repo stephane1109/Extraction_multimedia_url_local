@@ -6,7 +6,7 @@ Ce README décrit les dépendances et les fonctionnalités du script Streamlit d
 
 ## Prérequis système
 
-* **ffmpeg** installé et disponible dans votre PATH système (nécessaire pour la compression vidéo via `subprocess`).
+* **ffmpeg** installé sur votre Mac (nécessaire pour la compression vidéo via `subprocess`).
 
 ## Installation des dépendances Python
 
