@@ -1,5 +1,11 @@
 # README
 
+##
+########
+# Extraction posts and comments Reddit - en local
+# wwww.codeandcortex.fr
+########
+
 ## Préambule
 
 Ce README décrit les dépendances et les fonctionnalités du script Streamlit destiné à importer et traiter des vidéos YouTube ou locales.
