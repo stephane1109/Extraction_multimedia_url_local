@@ -3,10 +3,6 @@
 Extraction d'un vidéo Youtube ou depuis un fichier mp4 local : wwww.codeandcortex.fr
 
 
-## Préambule
-
-Ce README décrit les dépendances et les fonctionnalités du script Streamlit destiné à importer et traiter des vidéos YouTube ou locales.
-
 ## Prérequis système
 
 * **ffmpeg** installé sur votre Mac (nécessaire pour la compression vidéo via `subprocess`).
