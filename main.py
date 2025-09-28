@@ -66,11 +66,12 @@ def taille_fichier(path):
         return None
 
 def afficher_video_securisee(video_path):
-    # Affichage sans jamais appeler st.video(path)
+    # Affichage SANS JAMAIS appeler st.video(path)
     if not os.path.exists(video_path):
         st.error(f"Fichier vidéo introuvable : {video_path}")
         return
     size = taille_fichier(video_path)
+    st.caption(f"Chemin vidéo : {video_path} — Taille : {size if size is not None else 'inconnue'} octets")
     if size is None:
         st.error("Impossible de déterminer la taille du fichier vidéo.")
         return
