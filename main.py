@@ -1,7 +1,5 @@
 # pip install streamlit yt_dlp
 
-# pip install streamlit yt_dlp
-
 # ---------------- Imports ----------------
 import os
 # Désactivation du watcher de fichiers pour éviter "inotify instance limit reached" sur Streamlit Cloud
@@ -16,6 +14,10 @@ import shutil
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+# ---------------- Constantes ----------------
+# Seuil au-delà duquel on évite l’aperçu video car Streamlit charge le média en mémoire
+SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # ~160 Mo
+
 # ---------------- Fonctions utilitaires ----------------
 
 # Nettoyage du cache Streamlit
@@ -25,11 +27,11 @@ def vider_cache():
 
 # Normalisation ASCII sûre du titre pour nom de fichier
 def nettoyer_titre(titre):
-    # 1) Normalisation Unicode puis translittération ASCII
-    if titre is None:
+    # 1) garde-fou
+    if not titre:
         titre = "video"
+    # 2) remplacements simples
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    # Remplacer guillemets/apostrophes typographiques et caractères problématiques fréquents
     remplacement = {
         '«': '', '»': '', '“': '', '”': '', '’': '', '‘': '', '„': '',
         '"': '', "'": '', ':': '-', '/': '-', '\\': '-', '|': '-',
@@ -37,14 +39,14 @@ def nettoyer_titre(titre):
     }
     for k, v in remplacement.items():
         titre = titre.replace(k, v)
-    # Décomposition et suppression des diacritiques
+    # 3) normalisation + suppression diacritiques
     titre = unicodedata.normalize('NFKD', titre)
     titre = ''.join(c for c in titre if not unicodedata.combining(c))
-    # Garde lettres/chiffres/espaces/traits/underscores
+    # 4) ne garder que lettres/chiffres/espaces/-/_
     titre = re.sub(r'[^\w\s-]', '', titre, flags=re.UNICODE)
-    # Réduction des espaces -> underscore
+    # 5) espaces -> underscore
     titre = re.sub(r'\s+', '_', titre.strip())
-    # Troncature raisonnable
+    # 6) longueur raisonnable
     return titre[:80] if titre else "video"
 
 # Vérification de la présence de ffmpeg dans l'environnement
@@ -55,9 +57,8 @@ def ffmpeg_disponible():
     except Exception:
         return False
 
-# Renommer un fichier de manière atomique vers un nom cible
+# Renommer un fichier de manière atomique vers un nom cible sans collision
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
-    # Si le nom existe déjà, on suffixe avec _1, _2, ...
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -65,6 +66,50 @@ def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
         i += 1
     shutil.move(src_path, candidat)
     return candidat
+
+# Taille de fichier en octets (ou None si absent)
+def taille_fichier(path):
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return None
+
+# Affichage vidéo robuste dans Streamlit
+def afficher_video_securisee(video_path):
+    # 1) existence
+    if not os.path.exists(video_path):
+        st.error(f"Fichier introuvable pour l’aperçu vidéo : {video_path}")
+        return
+    # 2) taille
+    size = taille_fichier(video_path)
+    if size is None:
+        st.error("Impossible de déterminer la taille du fichier vidéo.")
+        return
+    # 3) si trop gros, proposer le téléchargement uniquement
+    if size > SEUIL_APERCU_OCTETS:
+        st.info("La vidéo est volumineuse pour un aperçu direct dans Streamlit.")
+        with open(video_path, "rb") as f:
+            st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
+        return
+    # 4) tentative d’aperçu par chemin + mime
+    try:
+        st.video(video_path, format="video/mp4")
+        return
+    except Exception:
+        pass
+    # 5) tentative d’aperçu par bytes
+    try:
+        with open(video_path, "rb") as f:
+            data = f.read()
+        st.video(data, format="video/mp4")
+        return
+    except Exception as e:
+        st.warning(f"Aperçu vidéo indisponible. Vous pouvez télécharger le fichier. Détail : {e}")
+        try:
+            with open(video_path, "rb") as f:
+                st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
+        except Exception:
+            st.error("Téléchargement impossible. Vérifiez l’existence et les droits sur le fichier.")
 
 # ---------------- Téléchargement + compression ----------------
 
@@ -80,17 +125,15 @@ def telecharger_video(url, repertoire, cookies_path=None):
         'Referer': 'https://www.youtube.com/'
     }
 
-    # Fallbacks de formats (on reste raisonnable ≤1080p d’abord)
     formats_fallbacks = [
         "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
         "bv*+ba/b",
         "b"
     ]
 
-    # Pour éviter tout souci de caractères dans les fichiers intermédiaires, on sort d’abord sur l’ID.
     base_opts = {
         'paths': {'home': repertoire},
-        'outtmpl': {'default': '%(id)s.%(ext)s'},
+        'outtmpl': {'default': '%(id)s.%(ext)s'},  # d’abord sur l’ID, puis on renommera
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -102,8 +145,8 @@ def telecharger_video(url, repertoire, cookies_path=None):
         'http_headers': http_headers,
         'geo_bypass': True,
         'nocheckcertificate': True,
-        'restrictfilenames': True,     # Noms sûrs ASCII
-        'trim_file_name': 200,         # Limite la longueur
+        'restrictfilenames': True,
+        'trim_file_name': 200,
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios', 'mweb', 'web']
@@ -127,9 +170,7 @@ def telecharger_video(url, repertoire, cookies_path=None):
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                # Chemin attendu (basé sur l’ID donc sûr)
-                fichier_attendu = ydl.prepare_filename(info)
-            # Vérifier la présence d’un fichier téléchargé
+                _ = ydl.prepare_filename(info)  # chemin attendu (basé sur l’ID)
             candidats = []
             for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']:
                 candidats += glob.glob(os.path.join(repertoire, f"*.{ext}"))
@@ -148,25 +189,28 @@ def telecharger_video(url, repertoire, cookies_path=None):
             msg += " — HTTP 403 détecté. Fournis un cookies.txt (format Netscape) exporté de ton navigateur."
         return None, None, msg
 
-    # Calcul du titre propre pour la destination finale
+    # Titre propre
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
     titre_net = nettoyer_titre(titre_brut)
 
-    # Compression en MP4 avec nom final propre
-    chemin_compress_base = os.path.join(repertoire, f"{titre_net}_compressed")
-    chemin_compress = renommer_sans_collision(fichier_final, os.path.join(repertoire, f"{titre_net}_source_tmp"), ext=os.path.splitext(fichier_final)[1])
+    # Compression vers MP4 final
+    # On déplace le fichier téléchargé vers un nom intermédiaire sans exotismes
+    ext_src = os.path.splitext(fichier_final)[1]
+    src_base = os.path.join(repertoire, f"{titre_net}_source_tmp")
+    chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    compressed_target = chemin_compress_base + ".mp4"
-    # Si le nom existe déjà, on le décale
+    # Cible finale compressée
+    compressed_base = os.path.join(repertoire, f"{titre_net}_compressed")
+    compressed_target = compressed_base + ".mp4"
     if os.path.exists(compressed_target):
         idx = 1
-        while os.path.exists(f"{chemin_compress_base}_{idx}.mp4"):
+        while os.path.exists(f"{compressed_base}_{idx}.mp4"):
             idx += 1
-        compressed_target = f"{chemin_compress_base}_{idx}.mp4"
+        compressed_target = f"{compressed_base}_{idx}.mp4"
 
     try:
         subprocess.run([
-            "ffmpeg", "-y", "-i", chemin_compress,
+            "ffmpeg", "-y", "-i", chemin_source_propre,
             "-vf", "scale=1280:-2",
             "-c:v", "libx264",
             "-preset", "slow",
@@ -177,10 +221,10 @@ def telecharger_video(url, repertoire, cookies_path=None):
     except Exception as e:
         return None, None, f"Echec de la compression avec ffmpeg : {e}"
     finally:
-        # On peut supprimer le fichier intermédiaire renommé si ce n’est pas le même
+        # Nettoyage du fichier intermédiaire
         try:
-            if os.path.exists(chemin_compress):
-                os.remove(chemin_compress)
+            if os.path.exists(chemin_source_propre):
+                os.remove(chemin_source_propre)
         except Exception:
             pass
 
@@ -272,7 +316,7 @@ if st.button("Lancer le téléchargement"):
             st.success("Vidéo compressée téléchargée avec succès dans ressources_globale.")
 
     elif fichier_local:
-        # On applique la même normalisation au titre local
+        # Normalisation du nom local
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
         original_path = os.path.join(repertoire_globale, f"{titre_net}_original.mp4")
         compressed_path = os.path.join(repertoire_globale, f"{titre_net}_compressed.mp4")
@@ -286,7 +330,6 @@ if st.button("Lancer le téléchargement"):
             "-c:a", "aac", "-b:a", "96k", compressed_path
         ], check=True)
 
-        # On peut supprimer l’original local (optionnel)
         try:
             os.remove(original_path)
         except Exception:
@@ -301,7 +344,9 @@ if st.button("Lancer le téléchargement"):
 # Extraction si vidéo présente
 if 'video_path' in st.session_state and os.path.exists(st.session_state['video_path']):
     st.markdown("---")
-    st.video(st.session_state['video_path'])
+    # Aperçu vidéo robuste (évite MediaFileStorageError)
+    afficher_video_securisee(st.session_state['video_path'])
+
     st.subheader("Paramètres d'extraction (ressources_intervalle)")
 
     col1, col2 = st.columns(2)
