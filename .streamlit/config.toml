@@ -1,0 +1,6 @@
+[server]
+fileWatcherType = "none"
+headless = true
+runOnSave = false
+enableCORS = false
+enableXsrfProtection = true
