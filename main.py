@@ -2,7 +2,7 @@
 
 # ---------------- Imports ----------------
 import os
-# Désactivation du watcher de fichiers pour éviter "inotify instance limit reached" sur Streamlit Cloud
+# Désactiver le watcher pour éviter "inotify instance limit reached" sur Streamlit Cloud
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import streamlit as st
@@ -15,22 +15,19 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 # ---------------- Constantes ----------------
-# Seuil au-delà duquel on évite l’aperçu video car Streamlit charge le média en mémoire
+# Seuil d’aperçu : au-delà, on évite de charger le MP4 en mémoire et on propose un téléchargement
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # ~160 Mo
 
 # ---------------- Fonctions utilitaires ----------------
 
-# Nettoyage du cache Streamlit
 def vider_cache():
-    # On vide explicitement le cache data
+    # Nettoyage explicite du cache Streamlit
     st.cache_data.clear()
 
-# Normalisation ASCII sûre du titre pour nom de fichier
 def nettoyer_titre(titre):
-    # 1) garde-fou
+    # Normalisation robuste du titre vers un nom de fichier ASCII sûr
     if not titre:
         titre = "video"
-    # 2) remplacements simples
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
     remplacement = {
         '«': '', '»': '', '“': '', '”': '', '’': '', '‘': '', '„': '',
@@ -39,17 +36,12 @@ def nettoyer_titre(titre):
     }
     for k, v in remplacement.items():
         titre = titre.replace(k, v)
-    # 3) normalisation + suppression diacritiques
     titre = unicodedata.normalize('NFKD', titre)
     titre = ''.join(c for c in titre if not unicodedata.combining(c))
-    # 4) ne garder que lettres/chiffres/espaces/-/_
     titre = re.sub(r'[^\w\s-]', '', titre, flags=re.UNICODE)
-    # 5) espaces -> underscore
     titre = re.sub(r'\s+', '_', titre.strip())
-    # 6) longueur raisonnable
     return titre[:80] if titre else "video"
 
-# Vérification de la présence de ffmpeg dans l'environnement
 def ffmpeg_disponible():
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -57,8 +49,8 @@ def ffmpeg_disponible():
     except Exception:
         return False
 
-# Renommer un fichier de manière atomique vers un nom cible sans collision
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
+    # Renommage atomique en évitant toute collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -67,44 +59,32 @@ def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
     shutil.move(src_path, candidat)
     return candidat
 
-# Taille de fichier en octets (ou None si absent)
 def taille_fichier(path):
     try:
         return os.path.getsize(path)
     except Exception:
         return None
 
-# Affichage vidéo robuste dans Streamlit
 def afficher_video_securisee(video_path):
-    # 1) existence
+    # Affichage sans jamais appeler st.video(path)
     if not os.path.exists(video_path):
-        st.error(f"Fichier introuvable pour l’aperçu vidéo : {video_path}")
+        st.error(f"Fichier vidéo introuvable : {video_path}")
         return
-    # 2) taille
     size = taille_fichier(video_path)
     if size is None:
         st.error("Impossible de déterminer la taille du fichier vidéo.")
         return
-    # 3) si trop gros, proposer le téléchargement uniquement
     if size > SEUIL_APERCU_OCTETS:
-        st.info("La vidéo est volumineuse pour un aperçu direct dans Streamlit.")
+        st.info("La vidéo est volumineuse pour un aperçu direct. Téléchargez-la ci-dessous.")
         with open(video_path, "rb") as f:
             st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
         return
-    # 4) tentative d’aperçu par chemin + mime
-    try:
-        st.video(video_path, format="video/mp4")
-        return
-    except Exception:
-        pass
-    # 5) tentative d’aperçu par bytes
     try:
         with open(video_path, "rb") as f:
             data = f.read()
         st.video(data, format="video/mp4")
-        return
     except Exception as e:
-        st.warning(f"Aperçu vidéo indisponible. Vous pouvez télécharger le fichier. Détail : {e}")
+        st.warning(f"Aperçu vidéo indisponible. Vous pouvez la télécharger. Détail : {e}")
         try:
             with open(video_path, "rb") as f:
                 st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
@@ -114,7 +94,7 @@ def afficher_video_securisee(video_path):
 # ---------------- Téléchargement + compression ----------------
 
 def telecharger_video(url, repertoire, cookies_path=None):
-    # Télécharge la vidéo avec des formats fallback et noms sûrs, puis compresse en MP4.
+    # Téléchargement robuste via yt-dlp + compression MP4
     st.write("Téléchargement de la vidéo compressée en cours...")
 
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
@@ -133,7 +113,7 @@ def telecharger_video(url, repertoire, cookies_path=None):
 
     base_opts = {
         'paths': {'home': repertoire},
-        'outtmpl': {'default': '%(id)s.%(ext)s'},  # d’abord sur l’ID, puis on renommera
+        'outtmpl': {'default': '%(id)s.%(ext)s'},  # Sortie initiale par ID pour éviter tout caractère exotique
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -170,7 +150,7 @@ def telecharger_video(url, repertoire, cookies_path=None):
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                _ = ydl.prepare_filename(info)  # chemin attendu (basé sur l’ID)
+                _ = ydl.prepare_filename(info)  # chemin attendu basé sur l’ID
             candidats = []
             for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']:
                 candidats += glob.glob(os.path.join(repertoire, f"*.{ext}"))
@@ -189,17 +169,14 @@ def telecharger_video(url, repertoire, cookies_path=None):
             msg += " — HTTP 403 détecté. Fournis un cookies.txt (format Netscape) exporté de ton navigateur."
         return None, None, msg
 
-    # Titre propre
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
     titre_net = nettoyer_titre(titre_brut)
 
-    # Compression vers MP4 final
-    # On déplace le fichier téléchargé vers un nom intermédiaire sans exotismes
+    # Déplacement du fichier source vers un nom propre et compression MP4 finale
     ext_src = os.path.splitext(fichier_final)[1]
     src_base = os.path.join(repertoire, f"{titre_net}_source_tmp")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    # Cible finale compressée
     compressed_base = os.path.join(repertoire, f"{titre_net}_compressed")
     compressed_target = compressed_base + ".mp4"
     if os.path.exists(compressed_target):
@@ -221,7 +198,6 @@ def telecharger_video(url, repertoire, cookies_path=None):
     except Exception as e:
         return None, None, f"Echec de la compression avec ffmpeg : {e}"
     finally:
-        # Nettoyage du fichier intermédiaire
         try:
             if os.path.exists(chemin_source_propre):
                 os.remove(chemin_source_propre)
@@ -316,7 +292,6 @@ if st.button("Lancer le téléchargement"):
             st.success("Vidéo compressée téléchargée avec succès dans ressources_globale.")
 
     elif fichier_local:
-        # Normalisation du nom local
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
         original_path = os.path.join(repertoire_globale, f"{titre_net}_original.mp4")
         compressed_path = os.path.join(repertoire_globale, f"{titre_net}_compressed.mp4")
@@ -344,7 +319,7 @@ if st.button("Lancer le téléchargement"):
 # Extraction si vidéo présente
 if 'video_path' in st.session_state and os.path.exists(st.session_state['video_path']):
     st.markdown("---")
-    # Aperçu vidéo robuste (évite MediaFileStorageError)
+    # Affichage vidéo sécurisé : jamais st.video(path)
     afficher_video_securisee(st.session_state['video_path'])
 
     st.subheader("Paramètres d'extraction (ressources_intervalle)")
