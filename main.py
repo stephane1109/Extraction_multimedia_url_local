@@ -1,27 +1,51 @@
 # pip install streamlit yt_dlp
 
+# pip install streamlit yt_dlp
+
 # ---------------- Imports ----------------
-import streamlit as st
 import os
+# Désactivation du watcher de fichiers pour éviter "inotify instance limit reached" sur Streamlit Cloud
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
+import streamlit as st
 import subprocess
 import re
 import glob
-import sys
+import unicodedata
+import shutil
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# ---------------- Fonctions ----------------
+# ---------------- Fonctions utilitaires ----------------
 
 # Nettoyage du cache Streamlit
 def vider_cache():
-    # On vide explicitement le cache data (comportement attendu par Streamlit >=1.25)
+    # On vide explicitement le cache data
     st.cache_data.clear()
 
-# Nettoyage du titre de la vidéo pour en faire un nom de fichier
+# Normalisation ASCII sûre du titre pour nom de fichier
 def nettoyer_titre(titre):
-    # On retire les caractères problématiques pour un nom de fichier multiplateforme
-    titre_nettoye = re.sub(r'[^\w\s-]', '', titre).strip().replace(' ', '_')
-    return titre_nettoye[:50]
+    # 1) Normalisation Unicode puis translittération ASCII
+    if titre is None:
+        titre = "video"
+    titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    # Remplacer guillemets/apostrophes typographiques et caractères problématiques fréquents
+    remplacement = {
+        '«': '', '»': '', '“': '', '”': '', '’': '', '‘': '', '„': '',
+        '"': '', "'": '', ':': '-', '/': '-', '\\': '-', '|': '-',
+        '?': '', '*': '', '<': '', '>': '', '\u00A0': ' '
+    }
+    for k, v in remplacement.items():
+        titre = titre.replace(k, v)
+    # Décomposition et suppression des diacritiques
+    titre = unicodedata.normalize('NFKD', titre)
+    titre = ''.join(c for c in titre if not unicodedata.combining(c))
+    # Garde lettres/chiffres/espaces/traits/underscores
+    titre = re.sub(r'[^\w\s-]', '', titre, flags=re.UNICODE)
+    # Réduction des espaces -> underscore
+    titre = re.sub(r'\s+', '_', titre.strip())
+    # Troncature raisonnable
+    return titre[:80] if titre else "video"
 
 # Vérification de la présence de ffmpeg dans l'environnement
 def ffmpeg_disponible():
@@ -31,128 +55,146 @@ def ffmpeg_disponible():
     except Exception:
         return False
 
-# Téléchargement et compression automatique de la vidéo
+# Renommer un fichier de manière atomique vers un nom cible
+def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
+    # Si le nom existe déjà, on suffixe avec _1, _2, ...
+    candidat = dest_path_base + ext
+    i = 1
+    while os.path.exists(candidat):
+        candidat = f"{dest_path_base}_{i}{ext}"
+        i += 1
+    shutil.move(src_path, candidat)
+    return candidat
+
+# ---------------- Téléchargement + compression ----------------
+
 def telecharger_video(url, repertoire, cookies_path=None):
-    # Cette fonction télécharge la vidéo YouTube avec des fallbacks de formats + clients alternatifs
-    # afin d’éviter l’erreur « download is empty », puis compresse le résultat en MP4.
+    # Télécharge la vidéo avec des formats fallback et noms sûrs, puis compresse en MP4.
     st.write("Téléchargement de la vidéo compressée en cours...")
 
-    # En-têtes et clients alternatifs pour contourner des blocages CDN/UA
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
     http_headers = {
         'User-Agent': user_agent,
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.5',
-        'Sec-Fetch-Mode': 'navigate',
         'Referer': 'https://www.youtube.com/'
     }
 
-    # Stratégie de formats:
-    # 1) bv*+ba (préférence mp4/m4a <=1080p)
-    # 2) bv*+ba générique
-    # 3) b (meilleur unique, audio/vidéo fusionnés si dispo)
+    # Fallbacks de formats (on reste raisonnable ≤1080p d’abord)
     formats_fallbacks = [
         "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
         "bv*+ba/b",
         "b"
     ]
 
-    # Options communes yt-dlp robustes
+    # Pour éviter tout souci de caractères dans les fichiers intermédiaires, on sort d’abord sur l’ID.
     base_opts = {
-        'paths': {'home': repertoire},                           # chemin racine de sortie
-        'outtmpl': {'default': '%(title)s.%(ext)s'},             # nommage par titre
+        'paths': {'home': repertoire},
+        'outtmpl': {'default': '%(id)s.%(ext)s'},
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'merge_output_format': 'mp4',                            # forcer la fusion en mp4 si possible
+        'merge_output_format': 'mp4',
         'retries': 10,
         'fragment_retries': 10,
         'continuedl': True,
+        'concurrent_fragment_downloads': 1,
         'http_headers': http_headers,
-        # Clients alternatifs pour YouTube afin d’avoir des URLs jouables plus souvent
+        'geo_bypass': True,
+        'nocheckcertificate': True,
+        'restrictfilenames': True,     # Noms sûrs ASCII
+        'trim_file_name': 200,         # Limite la longueur
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'web'],
-                # Active une meilleure récupération des sous-formats si nécessaire
-                'skip': ['dash_manifest_time_fix']  # neutre/sans risque; évite certains soucis de manifeste
+                'player_client': ['android', 'ios', 'mweb', 'web']
             }
         }
     }
 
-    # Ajout des cookies si fournis
     if cookies_path:
         base_opts['cookiefile'] = cookies_path
 
-    # Vérifie ffmpeg (utile pour fusionner et pour la compression ensuite)
     if not ffmpeg_disponible():
         st.warning("ffmpeg n’est pas détecté. Sur Streamlit Cloud, ajoute un fichier packages.txt contenant la ligne: ffmpeg")
-        # On peut quand même tenter un format déjà muxé (b) pour éviter la postproc.
-        # Les fallbacks ci-dessus incluent /b, donc on laisse continuer.
 
-    # On essaie les formats successivement jusqu’à réussite
     derniere_erreur = None
     info = None
-    chemin_telecharge = None
+    fichier_final = None
 
     for fmt in formats_fallbacks:
         ydl_opts = base_opts.copy()
         ydl_opts['format'] = fmt
         try:
             with YoutubeDL(ydl_opts) as ydl:
-                # On récupère d’abord les métadonnées pour avoir le nom attendu
                 info = ydl.extract_info(url, download=True)
-                # yt-dlp choisit l’extension finale; on récupère le chemin calculé
-                fichier_sortie = ydl.prepare_filename(info)
-            # Après téléchargement, on cherche le fichier effectivement créé (mp4, mkv, webm)
+                # Chemin attendu (basé sur l’ID donc sûr)
+                fichier_attendu = ydl.prepare_filename(info)
+            # Vérifier la présence d’un fichier téléchargé
             candidats = []
             for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']:
                 candidats += glob.glob(os.path.join(repertoire, f"*.{ext}"))
             if not candidats:
                 raise DownloadError("Téléchargement terminé mais aucun fichier détecté (download is empty).")
-            # On prend le plus récent
             candidats.sort(key=os.path.getmtime, reverse=True)
-            chemin_telecharge = candidats[0]
-            break  # succès, on sort de la boucle
+            fichier_final = candidats[0]
+            break
         except Exception as e:
             derniere_erreur = e
-            # On tente le fallback suivant
             continue
 
-    if chemin_telecharge is None:
-        # Tous les fallbacks ont échoué
-        msg = f"Echec du téléchargement. Dernière erreur : {derniere_erreur}"
+    if fichier_final is None:
+        msg = str(derniere_erreur) if derniere_erreur else "Echec inconnu."
+        if "403" in msg or "Forbidden" in msg:
+            msg += " — HTTP 403 détecté. Fournis un cookies.txt (format Netscape) exporté de ton navigateur."
         return None, None, msg
 
-    # Normalisation du titre
-    video_title_brut = (info.get('title') if info else os.path.splitext(os.path.basename(chemin_telecharge))[0]) or "video"
-    video_title = nettoyer_titre(video_title_brut)
+    # Calcul du titre propre pour la destination finale
+    titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
+    titre_net = nettoyer_titre(titre_brut)
 
-    # Si le fichier téléchargé n’est pas déjà mp4, on compresse/recode en mp4
-    compressed_path = os.path.join(repertoire, f"{video_title}_compressed.mp4")
+    # Compression en MP4 avec nom final propre
+    chemin_compress_base = os.path.join(repertoire, f"{titre_net}_compressed")
+    chemin_compress = renommer_sans_collision(fichier_final, os.path.join(repertoire, f"{titre_net}_source_tmp"), ext=os.path.splitext(fichier_final)[1])
+
+    compressed_target = chemin_compress_base + ".mp4"
+    # Si le nom existe déjà, on le décale
+    if os.path.exists(compressed_target):
+        idx = 1
+        while os.path.exists(f"{chemin_compress_base}_{idx}.mp4"):
+            idx += 1
+        compressed_target = f"{chemin_compress_base}_{idx}.mp4"
 
     try:
-        # Compression vidéo globale (identique à ton script d’origine)
         subprocess.run([
-            "ffmpeg", "-y", "-i", chemin_telecharge,
+            "ffmpeg", "-y", "-i", chemin_compress,
             "-vf", "scale=1280:-2",
             "-c:v", "libx264",
             "-preset", "slow",
             "-crf", "28",
             "-c:a", "aac", "-b:a", "96k",
-            compressed_path
+            compressed_target
         ], check=True)
     except Exception as e:
         return None, None, f"Echec de la compression avec ffmpeg : {e}"
+    finally:
+        # On peut supprimer le fichier intermédiaire renommé si ce n’est pas le même
+        try:
+            if os.path.exists(chemin_compress):
+                os.remove(chemin_compress)
+        except Exception:
+            pass
 
-    # On renvoie le chemin compressé et le titre
-    return compressed_path, video_title, None
+    return compressed_target, titre_net, None
 
-# Extraction des ressources à partir de la vidéo compressée
+# ---------------- Extraction des ressources ----------------
+
 def extraire_ressources(video_path, repertoire, debut, fin, video_title, options):
-    # Cette fonction garde exactement tes actions d’origine, avec gestion d’erreurs.
+    # Extraction de segments et d’images selon les options choisies, avec noms sûrs
     try:
+        titre_net = nettoyer_titre(video_title)
+
         if options.get("mp4"):
-            extrait_video_path = os.path.join(repertoire, f"{video_title}_extrait.mp4")
+            extrait_video_path = os.path.join(repertoire, f"{titre_net}_extrait.mp4")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
@@ -161,14 +203,14 @@ def extraire_ressources(video_path, repertoire, debut, fin, video_title, options
             ], check=True)
 
         if options.get("mp3"):
-            extrait_mp3_path = os.path.join(repertoire, f"{video_title}_extrait.mp3")
+            extrait_mp3_path = os.path.join(repertoire, f"{titre_net}_extrait.mp3")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vn", "-acodec", "libmp3lame", "-q:a", "5", extrait_mp3_path
             ], check=True)
 
         if options.get("wav"):
-            extrait_wav_path = os.path.join(repertoire, f"{video_title}_extrait.wav")
+            extrait_wav_path = os.path.join(repertoire, f"{titre_net}_extrait.wav")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vn", "-acodec", "adpcm_ima_wav", extrait_wav_path
@@ -177,7 +219,7 @@ def extraire_ressources(video_path, repertoire, debut, fin, video_title, options
         if options.get("img1") or options.get("img25"):
             for fps in [1, 25]:
                 if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
-                    images_repertoire = os.path.join(repertoire, f"images_{fps}fps_{video_title}")
+                    images_repertoire = os.path.join(repertoire, f"images_{fps}fps_{titre_net}")
                     os.makedirs(images_repertoire, exist_ok=True)
                     output_pattern = os.path.join(images_repertoire, "image_%04d.jpg")
                     subprocess.run([
@@ -230,9 +272,11 @@ if st.button("Lancer le téléchargement"):
             st.success("Vidéo compressée téléchargée avec succès dans ressources_globale.")
 
     elif fichier_local:
-        video_title = os.path.splitext(fichier_local.name)[0]
-        original_path = os.path.join(repertoire_globale, fichier_local.name)
-        compressed_path = os.path.join(repertoire_globale, f"{video_title}_compressed.mp4")
+        # On applique la même normalisation au titre local
+        titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
+        original_path = os.path.join(repertoire_globale, f"{titre_net}_original.mp4")
+        compressed_path = os.path.join(repertoire_globale, f"{titre_net}_compressed.mp4")
+
         with open(original_path, "wb") as f:
             f.write(fichier_local.read())
 
@@ -242,8 +286,14 @@ if st.button("Lancer le téléchargement"):
             "-c:a", "aac", "-b:a", "96k", compressed_path
         ], check=True)
 
+        # On peut supprimer l’original local (optionnel)
+        try:
+            os.remove(original_path)
+        except Exception:
+            pass
+
         st.session_state['video_path'] = compressed_path
-        st.session_state['video_title'] = video_title
+        st.session_state['video_title'] = titre_net
         st.success("Vidéo locale compressée avec succès dans ressources_globale.")
     else:
         st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
