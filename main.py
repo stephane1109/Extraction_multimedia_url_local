@@ -18,6 +18,9 @@ from yt_dlp.utils import DownloadError
 
 # ---------------- Constantes ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # ~160 Mo pour éviter de charger de très gros fichiers en mémoire
+# Longueurs cibles très courtes pour les noms
+LONGUEUR_TITRE_MAX = 24    # longueur max du titre "nettoyé" dans le nom
+LONGUEUR_PREFIX_ID = 8     # longueur de l'ID vidéo utilisé dans le nom
 
 # ---------------- Fonctions utilitaires ----------------
 
@@ -26,7 +29,7 @@ def vider_cache():
     st.cache_data.clear()
 
 def nettoyer_titre(titre):
-    # Normalisation robuste du titre vers un nom de fichier ASCII sûr
+    # Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -41,7 +44,16 @@ def nettoyer_titre(titre):
     titre = ''.join(c for c in titre if not unicodedata.combining(c))
     titre = re.sub(r'[^\w\s-]', '', titre, flags=re.UNICODE)
     titre = re.sub(r'\s+', '_', titre.strip())
-    return titre[:80] if titre else "video"
+    if not titre:
+        titre = "video"
+    # Raccourcissement strict
+    return titre[:LONGUEUR_TITRE_MAX]
+
+def generer_nom_base(video_id, titre):
+    # Construit un préfixe très court et stable: <id8>_<titreCourt>
+    vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
+    tit = nettoyer_titre(titre)
+    return f"{vid}_{tit}"
 
 def ffmpeg_disponible():
     try:
@@ -74,16 +86,7 @@ def lister_fichiers(patterns):
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
-def afficher_liste_fichiers(titre, fichiers):
-    st.markdown(f"**{titre}**")
-    if not fichiers:
-        st.write("Aucun fichier.")
-        return
-    for p in fichiers:
-        taille = taille_fichier(p)
-        st.write(f"- {os.path.basename(p)} — {taille if taille is not None else 'taille inconnue'} octets")
-
-def zipper_dossier(dossier, nom_zip_sans_ext="ressources_intervalle"):
+def zipper_dossier(dossier, nom_zip_sans_ext="ressources"):
     # Crée un ZIP en mémoire avec tout le contenu d'un dossier
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -101,26 +104,46 @@ def afficher_video_securisee(video_path):
         st.error(f"Fichier vidéo introuvable : {video_path}")
         return
     size = taille_fichier(video_path)
-    st.caption(f"Chemin vidéo : {video_path} — Taille : {size if size is not None else 'inconnue'} octets")
     if size is None:
         st.error("Impossible de déterminer la taille du fichier vidéo.")
         return
     if size > SEUIL_APERCU_OCTETS:
-        st.info("La vidéo est volumineuse pour un aperçu direct. Téléchargez-la ci-dessous.")
-        with open(video_path, "rb") as f:
-            st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
+        st.info("La vidéo est volumineuse pour un aperçu direct. Utilisez le bouton « Télécharger » ci-dessous.")
         return
     try:
         with open(video_path, "rb") as f:
             data = f.read()
         st.video(data, format="video/mp4")
     except Exception as e:
-        st.warning(f"Aperçu vidéo indisponible. Vous pouvez la télécharger. Détail : {e}")
+        st.warning(f"Aperçu vidéo indisponible. Utilisez le bouton « Télécharger ». Détail : {e}")
+
+def preparer_telechargement_unique(video_path, interval_dir, nom_zip="ressources_intervalle"):
+    # Prépare la charge utile d’un SEUL bouton « Télécharger » :
+    # - si des ressources existent dans ressources_intervalle : on propose un ZIP
+    # - sinon on propose la vidéo compressée
+    fichiers_intervalle = lister_fichiers([
+        os.path.join(interval_dir, "*.mp4"),
+        os.path.join(interval_dir, "*.mp3"),
+        os.path.join(interval_dir, "*.wav"),
+        os.path.join(interval_dir, "images_*", "*.jpg")
+    ])
+    if fichiers_intervalle:
+        buffer_zip, nom_zip_f = zipper_dossier(interval_dir, nom_zip)
+        return buffer_zip, nom_zip_f, "application/zip"
+    # sinon, proposer la vidéo compressée
+    if video_path and os.path.exists(video_path):
         try:
             with open(video_path, "rb") as f:
-                st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
+                data = f.read()
+            return data, os.path.basename(video_path), "video/mp4"
         except Exception:
-            st.error("Téléchargement impossible. Vérifiez l’existence et les droits sur le fichier.")
+            pass
+    # défaut: ZIP vide pour éviter de ne rien proposer
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        pass
+    buffer.seek(0)
+    return buffer, "vide.zip", "application/zip"
 
 # ---------------- Téléchargement + compression ----------------
 
@@ -144,7 +167,8 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
 
     base_opts = {
         'paths': {'home': repertoire},
-        'outtmpl': {'default': '%(id)s.%(ext)s'},  # Sortie initiale par ID pour éviter tout caractère exotique
+        # Sortie initiale par ID pour éviter tout caractère exotique; on renomme ensuite court
+        'outtmpl': {'default': '%(id)s.%(ext)s'},
         'noplaylist': True,
         'quiet': not verbose,
         'no_warnings': not verbose,
@@ -157,7 +181,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         'geo_bypass': True,
         'nocheckcertificate': True,
         'restrictfilenames': True,
-        'trim_file_name': 200,
+        'trim_file_name': 80,
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios', 'mweb', 'web']
@@ -167,7 +191,6 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
 
     if cookies_path:
         base_opts['cookiefile'] = cookies_path
-        st.info("Cookies chargés. Téléchargement avec cookies activé.")
 
     if not ffmpeg_disponible():
         st.warning("ffmpeg n’est pas détecté. Sur Streamlit Cloud, ajoute un fichier packages.txt contenant la ligne: ffmpeg")
@@ -180,8 +203,6 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         ydl_opts = base_opts.copy()
         ydl_opts['format'] = fmt
         try:
-            if verbose:
-                st.write(f"Tentative avec format: {fmt}")
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 _ = ydl.prepare_filename(info)  # chemin attendu basé sur l’ID
@@ -189,30 +210,29 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
             if not candidats:
                 raise DownloadError("Téléchargement terminé mais aucun fichier détecté (download is empty).")
             fichier_final = candidats[0]
-            if verbose:
-                st.write(f"Fichier téléchargé détecté: {os.path.basename(fichier_final)}")
             break
         except Exception as e:
             derniere_erreur = e
-            if verbose:
-                st.warning(f"Echec avec format {fmt} : {e}")
             continue
 
     if fichier_final is None:
         msg = str(derniere_erreur) if derniere_erreur else "Echec inconnu."
         if "403" in msg or "Forbidden" in msg:
             msg += " — HTTP 403 détecté. Fournis un cookies.txt (format Netscape) exporté de ton navigateur."
-        return None, None, msg
+        return None, None, None, msg
 
+    # Raccourci de nom: base très courte = <id8>_<titreCourt>
+    video_id = (info.get('id') if info else "vid") or "vid"
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
-    titre_net = nettoyer_titre(titre_brut)
+    base_court = generer_nom_base(video_id, titre_brut)
 
-    # Déplacement du fichier source vers un nom propre et compression MP4 finale
+    # Déplacement du fichier source vers un nom propre intermédiaire
     ext_src = os.path.splitext(fichier_final)[1]
-    src_base = os.path.join(repertoire, f"{titre_net}_source_tmp")
+    src_base = os.path.join(repertoire, f"{base_court}_src")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    compressed_base = os.path.join(repertoire, f"{titre_net}_compressed")
+    # Cible finale compressée très courte
+    compressed_base = os.path.join(repertoire, f"{base_court}_cmp")
     compressed_target = compressed_base + ".mp4"
     if os.path.exists(compressed_target):
         idx = 1
@@ -231,7 +251,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
             compressed_target
         ], check=True)
     except Exception as e:
-        return None, None, f"Echec de la compression avec ffmpeg : {e}"
+        return None, None, None, f"Echec de la compression avec ffmpeg : {e}"
     finally:
         try:
             if os.path.exists(chemin_source_propre):
@@ -239,17 +259,16 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         except Exception:
             pass
 
-    return compressed_target, titre_net, None
+    # On renvoie aussi un titre court à réutiliser pour nommer les extraits
+    return compressed_target, base_court, info, None
 
 # ---------------- Extraction des ressources ----------------
 
-def extraire_ressources(video_path, repertoire, debut, fin, video_title, options):
-    # Extraction de segments et d’images selon les options choisies, avec noms sûrs
+def extraire_ressources(video_path, repertoire, debut, fin, base_court, options):
+    # Extraction de segments et d’images selon les options choisies, avec noms très courts
     try:
-        titre_net = nettoyer_titre(video_title)
-
         if options.get("mp4"):
-            extrait_video_path = os.path.join(repertoire, f"{titre_net}_extrait.mp4")
+            extrait_video_path = os.path.join(repertoire, f"{base_court}_seg.mp4")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
@@ -258,14 +277,14 @@ def extraire_ressources(video_path, repertoire, debut, fin, video_title, options
             ], check=True)
 
         if options.get("mp3"):
-            extrait_mp3_path = os.path.join(repertoire, f"{titre_net}_extrait.mp3")
+            extrait_mp3_path = os.path.join(repertoire, f"{base_court}_seg.mp3")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vn", "-acodec", "libmp3lame", "-q:a", "5", extrait_mp3_path
             ], check=True)
 
         if options.get("wav"):
-            extrait_wav_path = os.path.join(repertoire, f"{titre_net}_extrait.wav")
+            extrait_wav_path = os.path.join(repertoire, f"{base_court}_seg.wav")
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                 "-vn", "-acodec", "adpcm_ima_wav", extrait_wav_path
@@ -274,9 +293,9 @@ def extraire_ressources(video_path, repertoire, debut, fin, video_title, options
         if options.get("img1") or options.get("img25"):
             for fps in [1, 25]:
                 if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
-                    images_repertoire = os.path.join(repertoire, f"images_{fps}fps_{titre_net}")
+                    images_repertoire = os.path.join(repertoire, f"img{fps}_{base_court}")
                     os.makedirs(images_repertoire, exist_ok=True)
-                    output_pattern = os.path.join(images_repertoire, "image_%04d.jpg")
+                    output_pattern = os.path.join(images_repertoire, "i_%04d.jpg")
                     subprocess.run([
                         "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                         "-vf", f"fps={fps},scale=1920:1080", "-q:v", "1", output_pattern
@@ -299,14 +318,11 @@ Entrez une URL YouTube ou importez un fichier mp4. La vidéo est compressée (12
 Vous pouvez ensuite définir un intervalle d'extraction et choisir les ressources à extraire dans **ressources_intervalle**.
 """)
 
-# Zone URL puis cookies juste en dessous (comme demandé)
+# URL puis cookies juste en dessous
 url = st.text_input("Entrez l'URL de la vidéo YouTube :")
-cookies_file = st.file_uploader("Uploader votre fichier cookies.txt (optionnel, juste sous l'URL)", type=["txt"])
+cookies_file = st.file_uploader("Uploader votre fichier cookies.txt (optionnel)", type=["txt"])
 fichier_local = st.file_uploader("Ou importez un fichier vidéo (.mp4)", type=["mp4"])
-
-col_opts = st.columns(2)
-with col_opts[0]:
-    mode_verbose = st.checkbox("Mode verbose yt-dlp (diagnostic)")
+mode_verbose = st.checkbox("Mode verbose yt-dlp (diagnostic)")
 
 repertoire_globale = os.path.abspath("ressources_globale")
 repertoire_intervalle = os.path.abspath("ressources_intervalle")
@@ -322,24 +338,20 @@ if st.button("Lancer le téléchargement"):
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        video_path, video_title, erreur = telecharger_video(url, repertoire_globale, cookies_path, verbose=mode_verbose)
+        video_path, base_court, info, erreur = telecharger_video(url, repertoire_globale, cookies_path, verbose=mode_verbose)
 
         if erreur:
             st.error(f"Erreur : {erreur}")
         else:
             st.session_state['video_path'] = video_path
-            st.session_state['video_title'] = video_title
-            st.success("Vidéo compressée téléchargée avec succès dans ressources_globale.")
-            # Afficher un bouton de téléchargement direct de la vidéo compressée
-            try:
-                with open(video_path, "rb") as f:
-                    st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(video_path), mime="video/mp4")
-            except Exception:
-                st.warning("Impossible de proposer le téléchargement direct de la vidéo (accès fichier).")
+            st.session_state['base_court'] = base_court
+            st.success(f"Vidéo compressée enregistrée : {os.path.basename(video_path)}")
     elif fichier_local:
+        # Compression locale avec nom très court
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
-        original_path = os.path.join(repertoire_globale, f"{titre_net}_original.mp4")
-        compressed_path = os.path.join(repertoire_globale, f"{titre_net}_compressed.mp4")
+        base_court = generer_nom_base("local", titre_net)
+        original_path = os.path.join(repertoire_globale, f"{base_court}_src.mp4")
+        compressed_path = os.path.join(repertoire_globale, f"{base_court}_cmp.mp4")
 
         with open(original_path, "wb") as f:
             f.write(fichier_local.read())
@@ -355,34 +367,17 @@ if st.button("Lancer le téléchargement"):
             except Exception:
                 pass
             st.session_state['video_path'] = compressed_path
-            st.session_state['video_title'] = titre_net
-            st.success("Vidéo locale compressée avec succès dans ressources_globale.")
-            # Bouton de téléchargement de la vidéo compressée
-            try:
-                with open(compressed_path, "rb") as f:
-                    st.download_button("Télécharger la vidéo compressée (MP4)", data=f, file_name=os.path.basename(compressed_path), mime="video/mp4")
-            except Exception:
-                st.warning("Impossible de proposer le téléchargement direct de la vidéo (accès fichier).")
+            st.session_state['base_court'] = base_court
+            st.success(f"Vidéo locale compressée : {os.path.basename(compressed_path)}")
         except Exception as e:
             st.error(f"Echec de la compression locale : {e}")
     else:
         st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-# Affichage et extraction si vidéo présente
+# Affichage, extraction et téléchargement unique si vidéo présente
 if 'video_path' in st.session_state and os.path.exists(st.session_state['video_path']):
     st.markdown("---")
-    # Aperçu vidéo sécurisé
     afficher_video_securisee(st.session_state['video_path'])
-
-    # Listing des fichiers dans ressources_globale
-    fichiers_globaux = lister_fichiers([
-        os.path.join(repertoire_globale, "*.mp4"),
-        os.path.join(repertoire_globale, "*.mkv"),
-        os.path.join(repertoire_globale, "*.webm"),
-        os.path.join(repertoire_globale, "*.m4a"),
-        os.path.join(repertoire_globale, "*.mp3")
-    ])
-    afficher_liste_fichiers("Fichiers présents dans ressources_globale", fichiers_globaux)
 
     st.subheader("Paramètres d'extraction (ressources_intervalle)")
 
@@ -390,7 +385,7 @@ if 'video_path' in st.session_state and os.path.exists(st.session_state['video_p
     debut = col1.number_input("Début (en secondes)", min_value=0, value=0)
     fin = col2.number_input("Fin (en secondes)", min_value=1, value=10)
 
-    st.markdown("**Choisissez les ressources à extraire :**")
+    st.markdown("Choisissez les ressources à extraire")
     opt_mp4 = st.checkbox("Vidéo MP4")
     opt_mp3 = st.checkbox("Audio MP3")
     opt_wav = st.checkbox("Audio WAV")
@@ -410,25 +405,21 @@ if 'video_path' in st.session_state and os.path.exists(st.session_state['video_p
             repertoire_intervalle,
             debut,
             fin,
-            st.session_state['video_title'],
+            st.session_state['base_court'],
             options
         )
         if erreur:
             st.error(f"Erreur pendant l'extraction : {erreur}")
         else:
-            st.success("Ressources extraites avec succès dans le répertoire ressources_intervalle.")
+            st.success("Ressources extraites dans le répertoire ressources_intervalle.")
 
-    # Listing des ressources extraites + bouton ZIP
-    st.subheader("Ressources extraites (ressources_intervalle)")
-    fichiers_intervalle = lister_fichiers([
-        os.path.join(repertoire_intervalle, "*.mp4"),
-        os.path.join(repertoire_intervalle, "*.mp3"),
-        os.path.join(repertoire_intervalle, "*.wav"),
-        os.path.join(repertoire_intervalle, "images_*", "*.jpg")
-    ])
-    afficher_liste_fichiers("Fichiers présents dans ressources_intervalle", fichiers_intervalle)
-
-    # Bouton pour télécharger toutes les ressources en ZIP
-    if st.button("Télécharger les ressources"):
-        buffer_zip, nom_zip = zipper_dossier(repertoire_intervalle, "ressources_intervalle")
-        st.download_button("Télécharger l'archive ZIP des ressources", data=buffer_zip, file_name=nom_zip, mime="application/zip")
+    st.markdown("---")
+    # Un SEUL bouton « Télécharger » :
+    # - Si des ressources existent, il télécharge le ZIP des ressources_intervalle
+    # - Sinon, il télécharge la vidéo compressée
+    data_dl, nom_dl, mime_dl = preparer_telechargement_unique(
+        st.session_state['video_path'],
+        repertoire_intervalle,
+        nom_zip="ressources_intervalle"
+    )
+    st.download_button("Télécharger", data=data_dl, file_name=nom_dl, mime=mime_dl)
