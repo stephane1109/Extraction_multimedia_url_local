@@ -30,7 +30,6 @@ def appliquer_optical_flow(images):
                     (0, 255, 0), 1, tipLength=0.4
                 )
         images_avec_flow.append(vis)
-    # On ajoute la dernière image telle quelle
     if len(images) > 0:
         images_avec_flow.append(images[-1])
     return images_avec_flow
@@ -38,8 +37,6 @@ def appliquer_optical_flow(images):
 def extraire_images_echantillonnees(chemin_video, dossier_sortie, fps_cible, avec_flow=False):
     """
     Extrait des images à intervalle régulier pour créer un timelapse (effet stop motion).
-    - fps_cible : nombre d'images par seconde dans la vidéo finale
-    - avec_flow : ajoute une visualisation du flux optique par-dessus (optionnel)
     Retourne (fps_original, nb_images).
     """
     cap = cv2.VideoCapture(chemin_video)
@@ -109,31 +106,26 @@ def reencoder_video_h264(chemin_entree, chemin_sortie):
 
 def generer_timelapse(chemin_video_source, dossier_sortie, base_court, fps_cible=12, avec_flow=False):
     """
-    Pipeline timelapse complet à partir d’une vidéo existante sur disque :
+    Pipeline timelapse complet à partir d’une vidéo existante :
     1) Extraction d’images échantillonnées
     2) Construction de la vidéo timelapse brute
     3) Réencodage H.264 final
     Retourne le chemin de la vidéo timelapse finale.
     """
-    # Dossiers intermédiaires
     dossier_images = os.path.join(dossier_sortie, f"timelapse_{fps_cible}fps_{base_court}")
     os.makedirs(dossier_images, exist_ok=True)
 
-    # Étape 1 : images
     fps_origine, nb = extraire_images_echantillonnees(
         chemin_video_source, dossier_images, fps_cible, avec_flow=avec_flow
     )
     if nb == 0:
         raise RuntimeError("Aucune image extraite pour le timelapse.")
 
-    # Étape 2 : vidéo brute
     chemin_brut = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cible}fps_brut.mp4")
     out = creer_video_depuis_images(dossier_images, chemin_brut, fps=fps_cible)
     if out is None:
         raise RuntimeError("Echec de la création de la vidéo timelapse brute.")
 
-    # Étape 3 : réencodage final
     chemin_final = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cible}fps.mp4")
     reencoder_video_h264(chemin_brut, chemin_final)
-
     return chemin_final
