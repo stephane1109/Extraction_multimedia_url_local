@@ -23,13 +23,12 @@ LONGUEUR_PREFIX_ID = 8                   # longueur de l'ID vidéo utilisé dans
 
 # ---------------- Fonctions utilitaires ----------------
 
-# Nettoyage du cache Streamlit
 def vider_cache():
-    # On vide explicitement le cache data
+    # Nettoyage explicite du cache Streamlit
     st.cache_data.clear()
 
-# Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
 def nettoyer_titre(titre):
+    # Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -48,13 +47,12 @@ def nettoyer_titre(titre):
         titre = "video"
     return titre[:LONGUEUR_TITRE_MAX]
 
-# Génération d’un préfixe court et stable <id8>_<titreCourt>
 def generer_nom_base(video_id, titre):
+    # Préfixe très court et stable: <id8>_<titreCourt>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
 
-# Vérification de la présence de ffmpeg dans l'environnement
 def ffmpeg_disponible():
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -62,8 +60,8 @@ def ffmpeg_disponible():
     except Exception:
         return False
 
-# Renommage atomique en évitant toute collision
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
+    # Renommage atomique en évitant toute collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -72,23 +70,22 @@ def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
     shutil.move(src_path, candidat)
     return candidat
 
-# Taille de fichier en octets
 def taille_fichier(path):
     try:
         return os.path.getsize(path)
     except Exception:
         return None
 
-# Liste des fichiers selon patterns
 def lister_fichiers(patterns):
+    # Retourne une liste de chemins correspondant à une liste de patterns glob
     files = []
     for p in patterns:
         files.extend(glob.glob(p))
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
-# Création d’un ZIP en mémoire
 def zipper_dossier(dossier, nom_zip_sans_ext="ressources"):
+    # Crée un ZIP en mémoire avec tout le contenu d'un dossier
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(dossier):
@@ -99,8 +96,8 @@ def zipper_dossier(dossier, nom_zip_sans_ext="ressources"):
     buffer.seek(0)
     return buffer, f"{nom_zip_sans_ext}.zip"
 
-# Affichage vidéo sans jamais appeler st.video(path)
 def afficher_video_securisee(video_path):
+    # Affichage SANS JAMAIS appeler st.video(path). On passe des bytes à st.video, ou on ne montre rien si trop gros.
     if not os.path.exists(video_path):
         return
     size = taille_fichier(video_path)
@@ -113,7 +110,6 @@ def afficher_video_securisee(video_path):
     except Exception:
         pass
 
-# Préparation du contenu pour le bouton unique « Télécharger »
 def preparer_un_seul_telechargement(video_path, interval_dir, nom_zip="ressources_intervalle"):
     # Si des ressources existent dans ressources_intervalle : fournir un ZIP
     fichiers_intervalle = lister_fichiers([
@@ -163,7 +159,8 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
 
     base_opts = {
         'paths': {'home': repertoire},
-        'outtmpl': {'default': '%(id)s.%(ext)s'},  # d’abord sur l’ID, puis renommer court
+        # Sortie initiale par ID pour éviter tout caractère exotique; on renomme ensuite court
+        'outtmpl': {'default': '%(id)s.%(ext)s'},
         'noplaylist': True,
         'quiet': not verbose,
         'no_warnings': not verbose,
@@ -200,7 +197,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                _ = ydl.prepare_filename(info)
+                _ = ydl.prepare_filename(info)  # chemin attendu basé sur l’ID
             candidats = lister_fichiers([os.path.join(repertoire, f"*.{ext}") for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']])
             if not candidats:
                 raise DownloadError("Téléchargement terminé mais aucun fichier détecté (download is empty).")
@@ -225,7 +222,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
     src_base = os.path.join(repertoire, f"{base_court}_src")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    # Cible finale compressée (nom court)
+    # Cible finale compressée très courte
     compressed_base = os.path.join(repertoire, f"{base_court}_cmp")
     compressed_target = compressed_base + ".mp4"
     if os.path.exists(compressed_target):
@@ -256,46 +253,60 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
     return compressed_target, base_court, info, None
 
 # ---------------- Extraction des ressources ----------------
+# Important : par défaut on extrait TOUTE la vidéo (pas d’intervalle).
+# Si l’utilisateur choisit "Intervalle personnalisé", on applique -ss/-to.
 
-def extraire_ressources(video_path, repertoire, debut, fin, base_court, options):
-    # Extraction de segments et d’images selon les options choisies, avec noms très courts
+def extraire_ressources(video_path, repertoire, debut, fin, base_court, options, utiliser_intervalle):
     try:
+        # Construction dynamique de la ligne ffmpeg selon qu’on utilise un intervalle ou non
+        def cmd_segment(sortie):
+            if utiliser_intervalle:
+                return [
+                    "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
+                    "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k", sortie
+                ]
+            else:
+                return [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k", sortie
+                ]
+
+        def cmd_audio(sortie, codec_args):
+            if utiliser_intervalle:
+                return ["ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path] + codec_args + [sortie]
+            else:
+                return ["ffmpeg", "-y", "-i", video_path] + codec_args + [sortie]
+
+        def cmd_images(output_pattern, fps):
+            vf = f"fps={fps},scale=1920:1080"
+            if utiliser_intervalle:
+                return ["ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+            else:
+                return ["ffmpeg", "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+
         if options.get("mp4"):
-            extrait_video_path = os.path.join(repertoire, f"{base_court}_seg.mp4")
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
-                "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                "-c:a", "aac", "-b:a", "96k",
-                extrait_video_path
-            ], check=True)
+            extrait_video_path = os.path.join(repertoire, f"{base_court}_full.mp4" if not utiliser_intervalle else f"{base_court}_seg.mp4")
+            subprocess.run(cmd_segment(extrait_video_path), check=True)
 
         if options.get("mp3"):
-            extrait_mp3_path = os.path.join(repertoire, f"{base_court}_seg.mp3")
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
-                "-vn", "-acodec", "libmp3lame", "-q:a", "5", extrait_mp3_path
-            ], check=True)
+            extrait_mp3_path = os.path.join(repertoire, f"{base_court}_full.mp3" if not utiliser_intervalle else f"{base_court}_seg.mp3")
+            subprocess.run(cmd_audio(extrait_mp3_path, ["-vn", "-acodec", "libmp3lame", "-q:a", "5"]), check=True)
 
         if options.get("wav"):
-            extrait_wav_path = os.path.join(repertoire, f"{base_court}_seg.wav")
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
-                "-vn", "-acodec", "adpcm_ima_wav", extrait_wav_path
-            ], check=True)
+            extrait_wav_path = os.path.join(repertoire, f"{base_court}_full.wav" if not utiliser_intervalle else f"{base_court}_seg.wav")
+            subprocess.run(cmd_audio(extrait_wav_path, ["-vn", "-acodec", "adpcm_ima_wav"]), check=True)
 
         if options.get("img1") or options.get("img25"):
             for fps in [1, 25]:
                 if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
-                    images_repertoire = os.path.join(repertoire, f"img{fps}_{base_court}")
+                    images_repertoire = os.path.join(repertoire, f"img{fps}_{base_court}" if utiliser_intervalle else f"img{fps}_full_{base_court}")
                     os.makedirs(images_repertoire, exist_ok=True)
                     output_pattern = os.path.join(images_repertoire, "i_%04d.jpg")
-                    subprocess.run([
-                        "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
-                        "-vf", f"fps={fps},scale=1920:1080", "-q:v", "1", output_pattern
-                    ], check=True)
+                    subprocess.run(cmd_images(output_pattern, fps), check=True)
 
         return None
-
     except Exception as e:
         return str(e)
 
@@ -306,10 +317,9 @@ st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
 
 vider_cache()
 
-# Texte d’intro avec lien vers l’extension Firefox pour cookies.txt
 st.markdown(
     "Entrez une URL YouTube ou importez un fichier mp4. La vidéo est compressée (1280px, CRF 28, AAC 96kbps) et enregistrée dans **ressources_globale**. "
-    "Vous pouvez ensuite définir un intervalle d'extraction et choisir les ressources à extraire dans **ressources_intervalle**. "
+    "Par défaut, l’extraction se fait sur **toute la vidéo**. Vous pouvez au besoin activer un intervalle personnalisé. "
     "Si la vidéo est restreinte, exportez vos cookies au format Netscape via l’extension Firefox "
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
@@ -325,7 +335,16 @@ repertoire_intervalle = os.path.abspath("ressources_intervalle")
 os.makedirs(repertoire_globale, exist_ok=True)
 os.makedirs(repertoire_intervalle, exist_ok=True)
 
-# Bouton principal de téléchargement
+def reinit_etat():
+    st.session_state["etendue"] = "Toute la vidéo"
+    st.session_state["opt_mp4"] = False
+    st.session_state["opt_mp3"] = False
+    st.session_state["opt_wav"] = False
+    st.session_state["opt_img1"] = False
+    st.session_state["opt_img25"] = False
+    st.session_state["debut_secs"] = 0
+    st.session_state["fin_secs"] = 10
+
 if st.button("Lancer le téléchargement"):
     if url:
         cookies_path = None
@@ -341,6 +360,7 @@ if st.button("Lancer le téléchargement"):
         else:
             st.session_state['video_path'] = video_path
             st.session_state['base_court'] = base_court
+            reinit_etat()
             st.success(f"Vidéo compressée enregistrée : {os.path.basename(video_path)}")
     elif fichier_local:
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
@@ -363,6 +383,7 @@ if st.button("Lancer le téléchargement"):
                 pass
             st.session_state['video_path'] = compressed_path
             st.session_state['base_court'] = base_court
+            reinit_etat()
             st.success(f"Vidéo locale compressée : {os.path.basename(compressed_path)}")
         except Exception as e:
             st.error(f"Echec de la compression locale : {e}")
@@ -375,43 +396,61 @@ if 'video_path' in st.session_state and os.path.exists(st.session_state['video_p
     afficher_video_securisee(st.session_state['video_path'])
 
     st.subheader("Paramètres d'extraction (ressources_intervalle)")
-    col1, col2 = st.columns(2)
-    debut = col1.number_input("Début (en secondes)", min_value=0, value=0)
-    fin = col2.number_input("Fin (en secondes)", min_value=1, value=10)
+
+    # Étendue par défaut: "Toute la vidéo". L’autre option ne s’applique que si choisie.
+    etendue = st.radio("Étendue de l’extraction", ["Toute la vidéo", "Intervalle personnalisé"], index=0 if st.session_state.get("etendue","Toute la vidéo")=="Toute la vidéo" else 1, key="etendue")
+
+    # Champs d’intervalle uniquement quand "Intervalle personnalisé" est sélectionné
+    if etendue == "Intervalle personnalisé":
+        col1, col2 = st.columns(2)
+        debut = col1.number_input("Début (en secondes)", min_value=0, value=st.session_state.get("debut_secs", 0), key="debut_secs")
+        fin = col2.number_input("Fin (en secondes)", min_value=1, value=max(1, st.session_state.get("fin_secs", 10)), key="fin_secs")
+        if fin <= debut:
+            st.warning("La fin doit être strictement supérieure au début.")
+    else:
+        debut = 0
+        fin = 0  # ignoré quand on n’utilise pas l’intervalle
 
     st.markdown("Choisissez les ressources à extraire")
-    opt_mp4 = st.checkbox("Vidéo MP4")
-    opt_mp3 = st.checkbox("Audio MP3")
-    opt_wav = st.checkbox("Audio WAV")
-    opt_img1 = st.checkbox("Images 1 FPS")
-    opt_img25 = st.checkbox("Images 25 FPS")
+    opt_mp4 = st.checkbox("Vidéo MP4", key="opt_mp4")
+    opt_mp3 = st.checkbox("Audio MP3", key="opt_mp3")
+    opt_wav = st.checkbox("Audio WAV", key="opt_wav")
+    opt_img1 = st.checkbox("Images 1 FPS", key="opt_img1")
+    opt_img25 = st.checkbox("Images 25 FPS", key="opt_img25")
 
     if st.button("Extraire les ressources"):
-        options = {
-            "mp4": opt_mp4,
-            "mp3": opt_mp3,
-            "wav": opt_wav,
-            "img1": opt_img1,
-            "img25": opt_img25
-        }
-        erreur = extraire_ressources(
-            st.session_state['video_path'],
-            repertoire_intervalle,
-            debut,
-            fin,
-            st.session_state['base_court'],
-            options
-        )
-        if erreur:
-            st.error(f"Erreur pendant l'extraction : {erreur}")
+        if not any([opt_mp4, opt_mp3, opt_wav, opt_img1, opt_img25]):
+            st.info("Aucune option sélectionnée. Coche au moins un type de ressource.")
         else:
-            st.success("Ressources extraites dans le répertoire ressources_intervalle.")
+            options = {
+                "mp4": opt_mp4,
+                "mp3": opt_mp3,
+                "wav": opt_wav,
+                "img1": opt_img1,
+                "img25": opt_img25
+            }
+            utiliser_intervalle = (etendue == "Intervalle personnalisé")
+            erreur = extraire_ressources(
+                st.session_state['video_path'],
+                os.path.abspath("ressources_intervalle"),
+                debut,
+                fin,
+                st.session_state['base_court'],
+                options,
+                utiliser_intervalle
+            )
+            if erreur:
+                st.error(f"Erreur pendant l'extraction : {erreur}")
+            else:
+                if utiliser_intervalle:
+                    st.success("Ressources extraites pour l’intervalle sélectionné dans le répertoire ressources_intervalle.")
+                else:
+                    st.success("Ressources extraites sur toute la vidéo dans le répertoire ressources_intervalle.")
 
     st.markdown("---")
-    # Un SEUL bouton « Télécharger » : ressources ZIP si dispo, sinon vidéo compressée
     data_dl, nom_dl, mime_dl = preparer_un_seul_telechargement(
         st.session_state['video_path'],
-        repertoire_intervalle,
+        os.path.abspath("ressources_intervalle"),
         nom_zip="ressources_intervalle"
     )
     st.download_button("Télécharger", data=data_dl, file_name=nom_dl, mime=mime_dl)
