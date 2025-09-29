@@ -1,4 +1,4 @@
-# pip install streamlit yt_dlp
+# pip install streamlit yt_dlp opencv-python
 
 # ---------------- Imports ----------------
 import os
@@ -15,21 +15,22 @@ from io import BytesIO
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+# Import de la fonction timelapse (fichier séparé)
+from timelapse import generer_timelapse
+
 # ---------------- Constantes ----------------
-SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # seuil d’aperçu pour éviter de charger des gros fichiers
+SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
 LONGUEUR_TITRE_MAX = 24
 LONGUEUR_PREFIX_ID = 8
-REPERTOIRE_SORTIE = os.path.abspath("fichiers")  # dossier de sortie unique
-REPERTOIRE_TEMP = os.path.abspath("tmp")        # dossier temp pour stabiliser l’upload local
+REPERTOIRE_SORTIE = os.path.abspath("fichiers")
+REPERTOIRE_TEMP = os.path.abspath("tmp")
 
 # ---------------- Utilitaires ----------------
 
 def vider_cache():
-    # Vide explicitement le cache Streamlit
     st.cache_data.clear()
 
 def nettoyer_titre(titre):
-    # Nettoyage robuste et raccourcissement strict
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -49,7 +50,6 @@ def nettoyer_titre(titre):
     return titre[:LONGUEUR_TITRE_MAX]
 
 def generer_nom_base(video_id, titre):
-    # Préfixe court et stable: <id8>_<TitreCourt>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
@@ -62,7 +62,6 @@ def ffmpeg_disponible():
         return False
 
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
-    # Renommage atomique sans collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -113,15 +112,11 @@ def collecter_sorties_run(prefix):
         os.path.join(REPERTOIRE_SORTIE, f"img25_{prefix}", "i_*.jpg"),
         os.path.join(REPERTOIRE_SORTIE, f"img1_full_{prefix}", "i_*.jpg"),
         os.path.join(REPERTOIRE_SORTIE, f"img25_full_{prefix}", "i_*.jpg"),
+        os.path.join(REPERTOIRE_SORTIE, f"timelapse_*_{prefix}", "*.jpg"),
     ]
     return lister_fichiers(patterns)
 
 def copier_upload_local_stable(uploader, titre_hint="local"):
-    """
-    Écrit immédiatement l’upload local dans un fichier temp stable pour:
-    - permettre l’aperçu AVANT traitement
-    - éviter le flux épuisé au premier clic
-    """
     if uploader is None:
         return None, None
     base = generer_nom_base("local", nettoyer_titre(os.path.splitext(uploader.name)[0] or titre_hint))
@@ -133,11 +128,6 @@ def copier_upload_local_stable(uploader, titre_hint="local"):
 # ---------------- Téléchargement / préparation vidéo ----------------
 
 def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_intervalle, debut, fin):
-    """
-    Si utiliser_intervalle = True, on ne télécharge que l'intervalle [debut, fin)
-    via yt-dlp (download_sections + force_keyframes_at_cuts). Sinon, vidéo complète.
-    On produit ensuite un MP4 de travail selon la qualité.
-    """
     st.write("Téléchargement / préparation de la vidéo en cours...")
 
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
@@ -207,12 +197,10 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
     base_court = generer_nom_base(video_id, titre_brut)
 
-    # Renom propre intermédiaire
     ext_src = os.path.splitext(fichier_final)[1]
     src_base = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_src")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    # Préparer la vidéo de travail
     cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
     if qualite == "Compressée (1280p, CRF 28)":
         try:
@@ -247,7 +235,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
 
     return cible, base_court, info, None
 
-# ---------------- Extraction des ressources ----------------
+# ---------------- Extraction des ressources (y compris images renommées) ----------------
 
 def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_intervalle):
     try:
@@ -274,7 +262,6 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
             else:
                 return ["ffmpeg", "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
 
-        # Vidéo / audio
         if options.get("mp4"):
             nom = f"{base_court}_seg.mp4" if utiliser_intervalle else f"{base_court}_full.mp4"
             subprocess.run(cmd_segment(os.path.join(REPERTOIRE_SORTIE, nom)), check=True)
@@ -287,20 +274,18 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
             nom = f"{base_court}_seg.wav" if utiliser_intervalle else f"{base_court}_full.wav"
             subprocess.run(cmd_audio(os.path.join(REPERTOIRE_SORTIE, nom), ["-vn", "-acodec", "adpcm_ima_wav"]), check=True)
 
-        # Images avec renommage par secondes
         if options.get("img1") or options.get("img25"):
             for fps in [1, 25]:
                 if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
                     dossier = f"img{fps}_{base_court}" if utiliser_intervalle else f"img{fps}_full_{base_court}"
                     rep = os.path.join(REPERTOIRE_SORTIE, dossier)
                     os.makedirs(rep, exist_ok=True)
-
                     tmp_pattern = os.path.join(rep, "tmp_%06d.jpg")
                     subprocess.run(cmd_images(tmp_pattern, fps), check=True)
 
-                    images_generees = sorted(glob.glob(os.path.join(rep, "tmp_*.jpg")))
+                    images_gen = sorted(glob.glob(os.path.join(rep, "tmp_*.jpg")))
                     start_offset = debut if utiliser_intervalle else 0
-                    for i, src in enumerate(images_generees):
+                    for i, src in enumerate(images_gen):
                         t_sec_float = start_offset + (i / float(fps))
                         sec = int(t_sec_float)
                         if fps == 1:
@@ -335,13 +320,13 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Valeurs par défaut conservées dans la session pour afficher le message AVANT les champs
+# Valeurs par défaut pour l’intervalle
 if "debut_secs" not in st.session_state:
     st.session_state["debut_secs"] = 0
 if "fin_secs" not in st.session_state:
     st.session_state["fin_secs"] = 10
 
-# Formulaire unique pour éviter le double-clic
+# Formulaire unique
 with st.form(key="form_traitement", clear_on_submit=False):
     url = st.text_input("URL YouTube")
     cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
@@ -351,18 +336,29 @@ with st.form(key="form_traitement", clear_on_submit=False):
 
     st.subheader("Ressources à produire")
     st.markdown("<style>div[data-testid='stHorizontalBlock'] label { white-space: nowrap; }</style>", unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
+    c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
     with c1: opt_mp4 = st.checkbox("MP4", key="opt_mp4")
     with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3")
     with c3: opt_wav = st.checkbox("WAV", key="opt_wav")
     with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
     with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
+    with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
+
+    # Options timelapse (affichées seulement si coché)
+    if opt_timelapse:
+        col_t1, col_t2 = st.columns([1,1])
+        with col_t1:
+            fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
+        with col_t2:
+            opt_flow = st.checkbox("Flux optique (overlay)", value=False, key="opt_flow")
+    else:
+        fps_timelapse = 12
+        opt_flow = False
 
     st.subheader("Étendue")
     etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
 
     if etendue == "Intervalle personnalisé":
-        # Message UNIQUE au-dessus des champs, basé sur les valeurs courantes en session
         st.info(f"Intervalle personnalisé activé : de {st.session_state['debut_secs']}s à {st.session_state['fin_secs']}s. Le téléchargement traitera uniquement cet intervalle.")
         cc1, cc2 = st.columns(2)
         debut = cc1.number_input("Début (s)", min_value=0, value=st.session_state["debut_secs"], key="debut_secs")
@@ -377,7 +373,7 @@ with st.form(key="form_traitement", clear_on_submit=False):
 
     submit = st.form_submit_button("Lancer le traitement")
 
-# Stabilisation de l’upload local pour l’aperçu avant traitement
+# État de session
 if 'local_temp_path' not in st.session_state:
     st.session_state['local_temp_path'] = None
 if 'local_name_base' not in st.session_state:
@@ -391,6 +387,7 @@ if 'apercu_placeholder' not in st.session_state:
 if 'apercu_local_bytes' not in st.session_state:
     st.session_state['apercu_local_bytes'] = None
 
+# Copie stable immédiate si upload local
 if st.session_state['local_temp_path'] is None and fichier_local is not None:
     temp_path, base_local = copier_upload_local_stable(fichier_local)
     if temp_path:
@@ -417,20 +414,19 @@ if afficher_apercu:
                 st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
             else:
                 st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
-    elif st.session_state.get('video_base') is None and st.session_state.get('apercu_local_bytes') is None and 'URL YouTube' != "":
+    elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
 # Action au submit
 if submit:
     with st.spinner("Traitement en cours..."):
-        # Cookies
         cookies_path = None
         if cookies_file is not None:
             cookies_path = os.path.join(REPERTOIRE_SORTIE, "cookies.txt")
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        # Cas URL
+        # Préparation de la vidéo de travail
         if url:
             video_base, base_court, info, err = telecharger_preparer_video(
                 url, cookies_path, mode_verbose, qualite, utiliser_intervalle, st.session_state["debut_secs"], st.session_state["fin_secs"]
@@ -441,8 +437,6 @@ if submit:
                 st.session_state['video_base'] = video_base
                 st.session_state['base_court'] = base_court
                 st.success(f"Vidéo prête : {os.path.basename(video_base)}")
-
-        # Cas fichier local
         elif st.session_state.get('local_temp_path'):
             base_court = st.session_state.get('local_name_base') or generer_nom_base("local", "video")
             src_local = st.session_state['local_temp_path']
@@ -472,7 +466,6 @@ if submit:
                             "ffmpeg", "-y", "-i", src_local, "-c", "copy", "-movflags", "+faststart", cible
                         ], check=True)
             except Exception:
-                # fallback transcodage léger
                 args = ["ffmpeg", "-y", "-i", src_local,
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                         "-c:a", "aac", "-b:a", "192k", cible]
@@ -490,11 +483,10 @@ if submit:
                 st.session_state['video_base'] = cible
                 st.session_state['base_court'] = base_court
                 st.success(f"Vidéo prête : {os.path.basename(cible)}")
-
         else:
             st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-        # Extraction après préparation
+        # Extraction ressources classiques
         if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
             debut_eff = st.session_state["debut_secs"] if utiliser_intervalle else 0
             fin_eff = st.session_state["fin_secs"] if utiliser_intervalle else (duree_video_seconds(st.session_state['video_base']) or 0)
@@ -506,7 +498,18 @@ if submit:
                 else:
                     st.success("Ressources générées.")
 
-# Aperçu après traitement + téléchargement
+            # Timelapse optionnel
+            if opt_timelapse:
+                try:
+                    sortie_timelapse = generer_timelapse(
+                        st.session_state['video_base'], REPERTOIRE_SORTIE, st.session_state['base_court'],
+                        fps_cible=fps_timelapse, avec_flow=opt_flow
+                    )
+                    st.success(f"Timelapse généré : {os.path.basename(sortie_timelapse)}")
+                except Exception as e:
+                    st.error(f"Echec du timelapse : {e}")
+
+# Aperçu après traitement + téléchargement ZIP
 if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
