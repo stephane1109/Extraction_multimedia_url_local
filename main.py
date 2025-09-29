@@ -25,14 +25,19 @@ REPERTOIRE_TEMP = os.path.abspath("tmp")        # dossier temp pour stabiliser l
 # ---------------- Utilitaires ----------------
 
 def vider_cache():
+    # Vide explicitement le cache Streamlit
     st.cache_data.clear()
 
 def nettoyer_titre(titre):
+    # Nettoyage robuste et raccourcissement strict
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    remplacement = {'«':'','»':'','“':'','”':'','’':'','‘':'','„':'','"':'',"'":'',
-                    ':':'-','/':'-','\\':'-','|':'-','?':'','*':'','<':'','>':'','\u00A0':' '}
+    remplacement = {
+        '«':'','»':'','“':'','”':'','’':'','‘':'','„':'',
+        '"':'',"'":'',
+        ':':'-','/':'-','\\':'-','|':'-','?':'','*':'','<':'','>':'','\u00A0':' '
+    }
     for k, v in remplacement.items():
         titre = titre.replace(k, v)
     titre = unicodedata.normalize('NFKD', titre)
@@ -44,6 +49,7 @@ def nettoyer_titre(titre):
     return titre[:LONGUEUR_TITRE_MAX]
 
 def generer_nom_base(video_id, titre):
+    # Préfixe court et stable: <id8>_<TitreCourt>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
@@ -56,6 +62,7 @@ def ffmpeg_disponible():
         return False
 
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
+    # Renommage atomique sans collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -265,6 +272,7 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
             else:
                 return ["ffmpeg", "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
 
+        # Vidéo / audio
         if options.get("mp4"):
             nom = f"{base_court}_seg.mp4" if utiliser_intervalle else f"{base_court}_full.mp4"
             subprocess.run(cmd_segment(os.path.join(REPERTOIRE_SORTIE, nom)), check=True)
@@ -277,14 +285,38 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
             nom = f"{base_court}_seg.wav" if utiliser_intervalle else f"{base_court}_full.wav"
             subprocess.run(cmd_audio(os.path.join(REPERTOIRE_SORTIE, nom), ["-vn", "-acodec", "adpcm_ima_wav"]), check=True)
 
+        # Images avec renommage par secondes
         if options.get("img1") or options.get("img25"):
             for fps in [1, 25]:
                 if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
+                    # Dossier de sortie
                     dossier = f"img{fps}_{base_court}" if utiliser_intervalle else f"img{fps}_full_{base_court}"
                     rep = os.path.join(REPERTOIRE_SORTIE, dossier)
                     os.makedirs(rep, exist_ok=True)
-                    output_pattern = os.path.join(rep, "i_%04d.jpg")
-                    subprocess.run(cmd_images(output_pattern, fps), check=True)
+
+                    # Génération brute avec un pattern temporaire
+                    tmp_pattern = os.path.join(rep, "tmp_%06d.jpg")
+                    subprocess.run(cmd_images(tmp_pattern, fps), check=True)
+
+                    # Renommage selon la seconde et le fps
+                    images_generees = sorted(glob.glob(os.path.join(rep, "tmp_*.jpg")))
+                    start_offset = debut if utiliser_intervalle else 0
+                    for i, src in enumerate(images_generees):
+                        t_sec_float = start_offset + (i / float(fps))
+                        sec = int(t_sec_float)
+                        if fps == 1:
+                            nom_cible = f"i_{sec}s_1fps.jpg"
+                        else:
+                            frame_in_sec = int(round((t_sec_float - sec) * fps))
+                            nom_cible = f"i_{sec}s_{fps}fps_{frame_in_sec:02d}.jpg"
+                        dst = os.path.join(rep, nom_cible)
+                        # éviter collision par prudence
+                        j = 1
+                        base_dst, ext = os.path.splitext(dst)
+                        while os.path.exists(dst):
+                            dst = f"{base_dst}_{j}{ext}"
+                            j += 1
+                        os.replace(src, dst)
 
         return None
     except Exception as e:
@@ -305,7 +337,7 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Un seul formulaire regroupe TOUS les widgets -> un seul submit propre et sans double-clic
+# Formulaire unique pour éviter le double-clic
 with st.form(key="form_traitement", clear_on_submit=False):
     url = st.text_input("URL YouTube")
     cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
@@ -331,6 +363,8 @@ with st.form(key="form_traitement", clear_on_submit=False):
         utiliser_intervalle = True
         if fin <= debut:
             st.warning("La fin doit être strictement supérieure au début.")
+        # Message explicite AVANT traitement
+        st.info(f"Intervalle personnalisé activé : de {debut}s à {fin}s. Le téléchargement traitera uniquement cet intervalle.")
     else:
         debut, fin, utiliser_intervalle = 0, 0, False
 
@@ -338,55 +372,21 @@ with st.form(key="form_traitement", clear_on_submit=False):
 
     submit = st.form_submit_button("Lancer le traitement")
 
-# Prépare immédiatement une copie locale stable pour l’aperçu (si upload local)
-if 'local_temp_path' not in st.session_state or st.session_state.get('local_name_base') is None:
+# Stabilisation de l’upload local pour l’aperçu avant traitement
+if 'local_temp_path' not in st.session_state:
     st.session_state['local_temp_path'] = None
+if 'local_name_base' not in st.session_state:
     st.session_state['local_name_base'] = None
-
-if st.session_state.get('local_temp_path') is None and 'fichier_local' not in st.session_state:
-    # Copie si l’utilisateur vient d’uploader
-    if 'fichier_local' not in st.session_state and 'local_temp_path' in st.session_state:
-        pass
-
-if 'last_upload_token' not in st.session_state:
-    st.session_state['last_upload_token'] = 0
-
-if 'upload_snapshot' not in st.session_state:
-    st.session_state['upload_snapshot'] = None
-
-# Si un fichier local est fourni à ce run, on le copie en temp de suite
-if 'upload_snapshot' in st.session_state:
-    pass
-if 'fichier_local_obj' not in st.session_state:
-    st.session_state['fichier_local_obj'] = None
-
 if 'video_base' not in st.session_state:
     st.session_state['video_base'] = None
 if 'base_court' not in st.session_state:
     st.session_state['base_court'] = None
-
 if 'apercu_placeholder' not in st.session_state:
     st.session_state['apercu_placeholder'] = st.empty()
-
-# Copie stable si un nouveau fichier est uploadé
-if 'uploaded_file_id' not in st.session_state:
-    st.session_state['uploaded_file_id'] = None
-
-if 'uploader_hash' not in st.session_state:
-    st.session_state['uploader_hash'] = None
-
 if 'apercu_local_bytes' not in st.session_state:
     st.session_state['apercu_local_bytes'] = None
 
-if 'apercu_note' not in st.session_state:
-    st.session_state['apercu_note'] = ""
-
-if 'video_ready' not in st.session_state:
-    st.session_state['video_ready'] = False
-
-# Stabilise l’upload local pour aperçu avant traitement
-if 'apercu_local_bytes' in st.session_state and st.session_state['apercu_local_bytes'] is None and fichier_local is not None:
-    # Première fois qu’on voit cet upload : copie disque et stocke bytes pour aperçu
+if st.session_state['local_temp_path'] is None and fichier_local is not None:
     temp_path, base_local = copier_upload_local_stable(fichier_local)
     if temp_path:
         st.session_state['local_temp_path'] = temp_path
@@ -415,7 +415,7 @@ if afficher_apercu:
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# Action unique au submit du formulaire
+# Action au submit
 if submit:
     with st.spinner("Traitement en cours..."):
         # Cookies
@@ -432,11 +432,9 @@ if submit:
             )
             if err:
                 st.error(f"Erreur : {err}")
-                st.session_state['video_ready'] = False
             else:
                 st.session_state['video_base'] = video_base
                 st.session_state['base_court'] = base_court
-                st.session_state['video_ready'] = True
                 st.success(f"Vidéo prête : {os.path.basename(video_base)}")
 
         # Cas fichier local
@@ -479,24 +477,20 @@ if submit:
                     subprocess.run(args, check=True)
                 except Exception as e:
                     st.error(f"Echec du traitement local : {e}")
-                    st.session_state['video_ready'] = False
                 else:
                     st.session_state['video_base'] = cible
                     st.session_state['base_court'] = base_court
-                    st.session_state['video_ready'] = True
                     st.success(f"Vidéo prête : {os.path.basename(cible)}")
             else:
                 st.session_state['video_base'] = cible
                 st.session_state['base_court'] = base_court
-                st.session_state['video_ready'] = True
                 st.success(f"Vidéo prête : {os.path.basename(cible)}")
 
         else:
             st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
-            st.session_state['video_ready'] = False
 
-        # Extraction après préparation si demandé
-        if st.session_state.get('video_ready') and st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
+        # Extraction après préparation
+        if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
             if not utiliser_intervalle:
                 d = duree_video_seconds(st.session_state['video_base'])
                 if d:
@@ -509,7 +503,7 @@ if submit:
                 else:
                     st.success("Ressources générées.")
 
-# Aperçu unique après traitement
+# Aperçu après traitement + téléchargement
 if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
@@ -518,7 +512,6 @@ if st.session_state.get('video_base') and os.path.exists(st.session_state['video
             with open(st.session_state['video_base'], "rb") as f:
                 st.video(f.read(), format="video/mp4")
 
-    # Téléchargement unique: ZIP de tout le run
     prefix = st.session_state['base_court']
     fichiers_run = collecter_sorties_run(prefix)
     if st.session_state['video_base'] not in fichiers_run:
