@@ -1,4 +1,4 @@
-# pip install streamlit yt_dlp opencv-python
+# pip install streamlit yt_dlp opencv-python-headless
 
 # ---------------- Imports ----------------
 import os
@@ -15,7 +15,6 @@ from io import BytesIO
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# Import de la fonction timelapse (fichier séparé)
 from timelapse import generer_timelapse
 
 # ---------------- Constantes ----------------
@@ -125,9 +124,19 @@ def copier_upload_local_stable(uploader, titre_hint="local"):
         f.write(uploader.read())
     return dest, base
 
+# ---------------- Logger yt-dlp silencieux (hors mode diagnostic) ----------------
+class _SilentLogger:
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
 # ---------------- Téléchargement / préparation vidéo ----------------
 
 def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_intervalle, debut, fin):
+    """
+    Télécharge (vidéo complète ou segment) puis prépare une vidéo de travail MP4.
+    Gestion explicite de 403 : si 403 sans cookies, on arrête proprement.
+    """
     st.write("Téléchargement / préparation de la vidéo en cours...")
 
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
@@ -149,8 +158,10 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
         'nocheckcertificate': True,
         'restrictfilenames': True,
         'trim_file_name': 80,
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}}
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}},
     }
+    if not verbose:
+        base_opts['logger'] = _SilentLogger()
 
     if utiliser_intervalle:
         base_opts['download_sections'] = [{'section': f"*{debut}-{fin}"}]
@@ -184,14 +195,18 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
             fichier_final = candidats[0]
             break
         except Exception as e:
+            msg = str(e) or repr(e)
             derniere_erreur = e
+            if "403" in msg or "Forbidden" in msg:
+                if not cookies_path:
+                    return None, None, None, "HTTP 403 détecté. La vidéo semble restreinte. Fournis un fichier cookies.txt (Firefox : cookies.txt) puis relance."
+                # Si cookies présents mais 403 quand même, on n’essaie pas d’autres formats
+                return None, None, None, "HTTP 403 persistant malgré cookies. Vérifie que le cookies.txt est valide et récent."
+            # Autres erreurs : on tente le format suivant
             continue
 
     if fichier_final is None:
-        msg = str(derniere_erreur) if derniere_erreur else "Echec inconnu."
-        if "403" in msg or "Forbidden" in msg:
-            msg += " — HTTP 403 détecté. Fournis un cookies.txt exporté de ton navigateur."
-        return None, None, None, msg
+        return None, None, None, (str(derniere_erreur) if derniere_erreur else "Echec inconnu au téléchargement.")
 
     video_id = (info.get('id') if info else "vid") or "vid"
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
@@ -235,7 +250,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
 
     return cible, base_court, info, None
 
-# ---------------- Extraction des ressources (y compris images renommées) ----------------
+# ---------------- Extraction des ressources ----------------
 
 def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_intervalle):
     try:
@@ -320,13 +335,11 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Valeurs par défaut pour l’intervalle
 if "debut_secs" not in st.session_state:
     st.session_state["debut_secs"] = 0
 if "fin_secs" not in st.session_state:
     st.session_state["fin_secs"] = 10
 
-# Formulaire unique
 with st.form(key="form_traitement", clear_on_submit=False):
     url = st.text_input("URL YouTube")
     cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
@@ -344,7 +357,6 @@ with st.form(key="form_traitement", clear_on_submit=False):
     with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
     with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-    # Options timelapse (affichées seulement si coché)
     if opt_timelapse:
         col_t1, col_t2 = st.columns([1,1])
         with col_t1:
@@ -370,10 +382,9 @@ with st.form(key="form_traitement", clear_on_submit=False):
         debut, fin, utiliser_intervalle = 0, 0, False
 
     afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
-
     submit = st.form_submit_button("Lancer le traitement")
 
-# État de session
+# État et aperçu
 if 'local_temp_path' not in st.session_state:
     st.session_state['local_temp_path'] = None
 if 'local_name_base' not in st.session_state:
@@ -387,12 +398,12 @@ if 'apercu_placeholder' not in st.session_state:
 if 'apercu_local_bytes' not in st.session_state:
     st.session_state['apercu_local_bytes'] = None
 
-# Copie stable immédiate si upload local
-if st.session_state['local_temp_path'] is None and fichier_local is not None:
+if st.session_state['local_temp_path'] is None and 'fichier_local_init' not in st.session_state and 'fichier_local' in locals() and fichier_local is not None:
     temp_path, base_local = copier_upload_local_stable(fichier_local)
     if temp_path:
         st.session_state['local_temp_path'] = temp_path
         st.session_state['local_name_base'] = base_local
+        st.session_state['fichier_local_init'] = True
         try:
             with open(temp_path, "rb") as f:
                 data = f.read()
@@ -400,7 +411,6 @@ if st.session_state['local_temp_path'] is None and fichier_local is not None:
         except Exception:
             st.session_state['apercu_local_bytes'] = b""
 
-# Aperçu avant traitement
 if afficher_apercu:
     if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
         with st.session_state['apercu_placeholder']:
@@ -417,7 +427,7 @@ if afficher_apercu:
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# Action au submit
+# Traitement
 if submit:
     with st.spinner("Traitement en cours..."):
         cookies_path = None
@@ -426,7 +436,7 @@ if submit:
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        # Préparation de la vidéo de travail
+        # Préparation vidéo
         if url:
             video_base, base_court, info, err = telecharger_preparer_video(
                 url, cookies_path, mode_verbose, qualite, utiliser_intervalle, st.session_state["debut_secs"], st.session_state["fin_secs"]
@@ -486,7 +496,7 @@ if submit:
         else:
             st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-        # Extraction ressources classiques
+        # Extraction et timelapse
         if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
             debut_eff = st.session_state["debut_secs"] if utiliser_intervalle else 0
             fin_eff = st.session_state["fin_secs"] if utiliser_intervalle else (duree_video_seconds(st.session_state['video_base']) or 0)
@@ -498,7 +508,6 @@ if submit:
                 else:
                     st.success("Ressources générées.")
 
-            # Timelapse optionnel
             if opt_timelapse:
                 try:
                     sortie_timelapse = generer_timelapse(
@@ -509,7 +518,7 @@ if submit:
                 except Exception as e:
                     st.error(f"Echec du timelapse : {e}")
 
-# Aperçu après traitement + téléchargement ZIP
+# Aperçu et téléchargement
 if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
