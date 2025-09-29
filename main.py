@@ -2,8 +2,7 @@
 
 # ---------------- Imports ----------------
 import os
-# Désactiver le watcher pour éviter "inotify instance limit reached" sur Streamlit Cloud
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # éviter inotify sur Streamlit Cloud
 
 import streamlit as st
 import subprocess
@@ -17,19 +16,19 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 # ---------------- Constantes ----------------
-SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # ~160 Mo pour éviter de charger de très gros fichiers en mémoire
-LONGUEUR_TITRE_MAX = 24                  # longueur max du titre nettoyé
-LONGUEUR_PREFIX_ID = 8                   # longueur de l'ID vidéo utilisé dans le nom
-REPERTOIRE_SORTIE = os.path.abspath("fichiers")  # répertoire unique de sortie
+SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # seuil d’aperçu pour éviter de charger des gros fichiers
+LONGUEUR_TITRE_MAX = 24
+LONGUEUR_PREFIX_ID = 8
+REPERTOIRE_SORTIE = os.path.abspath("fichiers")  # unique dossier de sortie
 
-# ---------------- Fonctions utilitaires ----------------
+# ---------------- Utilitaires ----------------
 
 def vider_cache():
-    # Nettoyage explicite du cache Streamlit
+    # Vide explicitement le cache Streamlit
     st.cache_data.clear()
 
 def nettoyer_titre(titre):
-    # Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
+    # Nettoyage robuste et raccourcissement strict
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -49,7 +48,7 @@ def nettoyer_titre(titre):
     return titre[:LONGUEUR_TITRE_MAX]
 
 def generer_nom_base(video_id, titre):
-    # Préfixe très court et stable: <id8>_<titreCourt>
+    # Préfixe court et stable: <id8>_<TitreCourt>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
@@ -62,7 +61,7 @@ def ffmpeg_disponible():
         return False
 
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
-    # Renommage atomique en évitant toute collision
+    # Renommage atomique sans collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -78,7 +77,6 @@ def taille_fichier(path):
         return None
 
 def lister_fichiers(patterns):
-    # Retourne une liste de chemins correspondant à une liste de patterns glob
     files = []
     for p in patterns:
         files.extend(glob.glob(p))
@@ -86,7 +84,6 @@ def lister_fichiers(patterns):
     return files
 
 def zipper_fichiers(fichiers, nom_zip_sans_ext):
-    # Crée un ZIP en mémoire avec uniquement les fichiers donnés
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for abs_path in fichiers:
@@ -94,21 +91,6 @@ def zipper_fichiers(fichiers, nom_zip_sans_ext):
                 zf.write(abs_path, arcname=os.path.basename(abs_path))
     buffer.seek(0)
     return buffer, f"{nom_zip_sans_ext}.zip"
-
-def afficher_video_depuis_fichier(video_path, placeholder):
-    # Affichage SANS JAMAIS appeler st.video(path). On passe des bytes à st.video, via un seul placeholder.
-    if not os.path.exists(video_path):
-        return
-    size = taille_fichier(video_path)
-    if size is None or size > SEUIL_APERCU_OCTETS:
-        return
-    try:
-        with open(video_path, "rb") as f:
-            data = f.read()
-        with placeholder:
-            st.video(data, format="video/mp4")
-    except Exception:
-        pass
 
 def duree_video_seconds(video_path):
     try:
@@ -122,7 +104,6 @@ def duree_video_seconds(video_path):
         return None
 
 def collecter_sorties_run(prefix):
-    # Récupère tous les fichiers produits pour ce run, identifiables par leur préfixe
     patterns = [
         os.path.join(REPERTOIRE_SORTIE, f"{prefix}*.mp4"),
         os.path.join(REPERTOIRE_SORTIE, f"{prefix}*.mp3"),
@@ -134,10 +115,15 @@ def collecter_sorties_run(prefix):
     ]
     return lister_fichiers(patterns)
 
-# ---------------- Téléchargement + préparation vidéo ----------------
+# ---------------- Téléchargement / préparation vidéo ----------------
 
-def telecharger_preparer_video(url, cookies_path, verbose, qualite):
-    # Téléchargement via yt-dlp, puis préparation de la vidéo de base selon la qualité choisie
+def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_intervalle, debut, fin):
+    """
+    Si utiliser_intervalle = True, on ne télécharge que l'intervalle [debut, fin)
+    via yt-dlp 'download_sections' et on force les keyframes à la coupe.
+    Sinon, on télécharge la vidéo complète.
+    Puis on prépare une vidéo de travail MP4 selon la qualité.
+    """
     st.write("Téléchargement / préparation de la vidéo en cours...")
 
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
@@ -155,7 +141,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
 
     base_opts = {
         'paths': {'home': REPERTOIRE_SORTIE},
-        'outtmpl': {'default': '%(id)s.%(ext)s'},  # nom temporaire sûr
+        'outtmpl': {'default': '%(id)s.%(ext)s'},
         'noplaylist': True,
         'quiet': not verbose,
         'no_warnings': not verbose,
@@ -172,8 +158,17 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
         'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}}
     }
 
+    # Téléchargement de SECTIONS si demandé
+    if utiliser_intervalle:
+        # équivaut à --download-sections "*start-end"
+        base_opts['download_sections'] = [ {'section': f"*{debut}-{fin}"} ]
+        base_opts['force_keyframes_at_cuts'] = True
+
     if cookies_path:
         base_opts['cookiefile'] = cookies_path
+
+    if not ffmpeg_disponible():
+        st.warning("ffmpeg n’est pas détecté. Ajoute 'ffmpeg' dans packages.txt.")
 
     derniere_erreur = None
     info = None
@@ -210,9 +205,9 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
     src_base = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_src")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    # Préparer la vidéo « de travail » selon la qualité demandée
+    # Préparer la vidéo de travail selon la qualité
+    cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
     if qualite == "Compressée (1280p, CRF 28)":
-        cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
         try:
             subprocess.run([
                 "ffmpeg", "-y", "-i", chemin_source_propre,
@@ -226,8 +221,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
         except Exception as e:
             return None, None, None, f"Echec de la compression : {e}"
     else:
-        # HD (max) : copie/remux vers mp4
-        cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
+        # HD (max) : remux en mp4 si possible, sinon transcodage léger
         try:
             subprocess.run(["ffmpeg", "-y", "-i", chemin_source_propre, "-c", "copy", "-movflags", "+faststart", cible], check=True)
         except Exception:
@@ -240,7 +234,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
             except Exception as e:
                 return None, None, None, f"Echec du remux/transcodage : {e}"
 
-    # Nettoyage de la source temporaire
+    # Nettoyage
     try:
         if os.path.exists(chemin_source_propre):
             os.remove(chemin_source_propre)
@@ -253,7 +247,6 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite):
 
 def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_intervalle):
     try:
-        # Génère la commande segment selon intervalle ou totalité
         def cmd_segment(sortie):
             if utiliser_intervalle:
                 return [
@@ -314,25 +307,25 @@ st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
 vider_cache()
 os.makedirs(REPERTOIRE_SORTIE, exist_ok=True)
 
-# Note importante sous le titre avec lien cliquable vers l’extension Firefox cookies.txt
+# Note sous le titre (lien cookies cliquable)
 st.markdown(
     "Par défaut, l’extraction porte sur **toute la vidéo**. Vous pouvez activer un intervalle personnalisé si besoin. "
     "Si la vidéo est restreinte (403), exportez vos cookies avec l’extension Firefox : "
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Saisie URL puis cookies juste en dessous (sans mention du format Netscape)
+# URL + cookies
 url = st.text_input("URL YouTube")
 cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
 
-# Upload local facultatif
+# Upload local (aperçu immédiat)
 fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
 
-# Mode diagnostic puis qualité juste en dessous
+# Mode diagnostic + qualité
 mode_verbose = st.checkbox("Mode diagnostic yt-dl")
 qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
 
-# Ressources à produire — alignement horizontal en 5 colonnes
+# Ressources à produire alignées
 st.subheader("Ressources à produire")
 st.markdown("""
     <style>
@@ -351,7 +344,7 @@ with col_r4:
 with col_r5:
     opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 
-# Étendue : toute la vidéo par défaut, intervalle activable
+# Étendue et intervalle
 st.subheader("Étendue")
 etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
 if etendue == "Intervalle personnalisé":
@@ -365,11 +358,25 @@ else:
     debut, fin = 0, 0
     utiliser_intervalle = False
 
-# Interrupteur pour contrôler l’unique aperçu (évite les doublons visuels après rerun)
+# Aperçu unique controlé par placeholder
 afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
 apercu_placeholder = st.empty()
 
-# Bouton unique de traitement (téléchargement + préparation + extraction)
+# Aperçu immédiat si fichier local avant traitement
+if afficher_apercu and fichier_local is not None:
+    try:
+        pos = fichier_local.tell()
+        data_local = fichier_local.read()
+        fichier_local.seek(pos)  # remettre le curseur
+        if len(data_local) <= SEUIL_APERCU_OCTETS:
+            with apercu_placeholder:
+                st.video(data_local, format="video/mp4")
+        else:
+            apercu_placeholder.info("Fichier local volumineux : aperçu désactivé (télécharge pour prévisualiser).")
+    except Exception:
+        pass
+
+# Bouton unique « Lancer le traitement »
 if st.button("Lancer le traitement"):
     cookies_path = None
     if cookies_file:
@@ -377,9 +384,10 @@ if st.button("Lancer le traitement"):
         with open(cookies_path, "wb") as f:
             f.write(cookies_file.read())
 
+    # Cas URL
     if url:
         video_base, base_court, info, err = telecharger_preparer_video(
-            url, cookies_path, mode_verbose, qualite
+            url, cookies_path, mode_verbose, qualite, utiliser_intervalle, debut, fin
         )
         if err:
             st.error(f"Erreur : {err}")
@@ -387,6 +395,8 @@ if st.button("Lancer le traitement"):
             st.session_state['video_base'] = video_base
             st.session_state['base_court'] = base_court
             st.success(f"Vidéo prête : {os.path.basename(video_base)}")
+
+    # Cas fichier local
     elif fichier_local:
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
         base_court = generer_nom_base("local", titre_net)
@@ -396,28 +406,41 @@ if st.button("Lancer le traitement"):
         cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
         if qualite == "Compressée (1280p, CRF 28)":
             try:
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", chemin_temp,
-                    "-vf", "scale=1280:-2",
-                    "-c:v", "libx264",
-                    "-preset", "slow",
-                    "-crf", "28",
-                    "-c:a", "aac", "-b:a", "96k",
-                    cible
-                ], check=True)
+                if utiliser_intervalle:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", chemin_temp,
+                        "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                        "-c:a", "aac", "-b:a", "96k", cible
+                    ], check=True)
+                else:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", chemin_temp,
+                        "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                        "-c:a", "aac", "-b:a", "96k", cible
+                    ], check=True)
             except Exception as e:
                 st.error(f"Echec de la compression locale : {e}")
                 cible = None
         else:
             try:
-                subprocess.run(["ffmpeg", "-y", "-i", chemin_temp, "-c", "copy", "-movflags", "+faststart", cible], check=True)
+                if utiliser_intervalle:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-ss", str(debut), "-to", str(fin), "-i", chemin_temp,
+                        "-c", "copy", "-movflags", "+faststart", cible
+                    ], check=True)
+                else:
+                    subprocess.run(["ffmpeg", "-y", "-i", chemin_temp, "-c", "copy", "-movflags", "+faststart", cible], check=True)
             except Exception:
                 try:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-i", chemin_temp,
+                    args = [
+                        "ffmpeg", "-y",
+                        "-i", chemin_temp,
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                         "-c:a", "aac", "-b:a", "192k", cible
-                    ], check=True)
+                    ]
+                    if utiliser_intervalle:
+                        args = ["ffmpeg", "-y", "-ss", str(debut), "-to", str(fin)] + args[2:]
+                    subprocess.run(args, check=True)
                 except Exception as e:
                     st.error(f"Echec du remux/transcodage local : {e}")
                     cible = None
@@ -430,11 +453,13 @@ if st.button("Lancer le traitement"):
             st.session_state['video_base'] = cible
             st.session_state['base_court'] = base_court
             st.success(f"Vidéo prête : {os.path.basename(cible)}")
+
     else:
         st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-    # Extraction des ressources demandées
+    # Extraction des ressources choisies
     if 'video_base' in st.session_state and os.path.exists(st.session_state['video_base']):
+        # Si intervalle désactivé, on fixe fin = durée réelle (info)
         if not utiliser_intervalle:
             d = duree_video_seconds(st.session_state['video_base'])
             if d:
@@ -459,17 +484,25 @@ if st.button("Lancer le traitement"):
             else:
                 st.success("Ressources générées.")
 
-# Affichage éventuel (via un seul placeholder) et bouton unique « Télécharger »
+# Aperçu unique après traitement (pour URL ou local converti)
+apercu_placeholder2 = st.empty()
 if 'video_base' in st.session_state and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if afficher_apercu:
-        afficher_video_depuis_fichier(st.session_state['video_base'], apercu_placeholder)
-    else:
-        apercu_placeholder.empty()
+        size = taille_fichier(st.session_state['video_base']) or 0
+        if size <= SEUIL_APERCU_OCTETS:
+            with apercu_placeholder2:
+                with open(st.session_state['video_base'], "rb") as f:
+                    st.video(f.read(), format="video/mp4")
 
+    # Téléchargement unique : ZIP de tout le run (y compris vidéo de base)
     prefix = st.session_state['base_court']
     fichiers_run = collecter_sorties_run(prefix)
     if st.session_state['video_base'] not in fichiers_run:
         fichiers_run.append(st.session_state['video_base'])
     buffer_zip, nom_zip = zipper_fichiers(fichiers_run, f"resultats_{prefix}")
     st.download_button("Télécharger", data=buffer_zip, file_name=nom_zip, mime="application/zip")
+
+# Note explicite si URL sans traitement (pas d’aperçu possible avant d’avoir téléchargé)
+if url and 'video_base' not in st.session_state:
+    st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
