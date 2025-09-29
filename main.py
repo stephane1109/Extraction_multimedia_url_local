@@ -18,18 +18,18 @@ from yt_dlp.utils import DownloadError
 
 # ---------------- Constantes ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024  # ~160 Mo pour éviter de charger de très gros fichiers en mémoire
-# Longueurs cibles très courtes pour les noms
-LONGUEUR_TITRE_MAX = 24    # longueur max du titre "nettoyé" dans le nom
-LONGUEUR_PREFIX_ID = 8     # longueur de l'ID vidéo utilisé dans le nom
+LONGUEUR_TITRE_MAX = 24                  # longueur max du titre nettoyé
+LONGUEUR_PREFIX_ID = 8                   # longueur de l'ID vidéo utilisé dans le nom
 
 # ---------------- Fonctions utilitaires ----------------
 
+# Nettoyage du cache Streamlit
 def vider_cache():
-    # Nettoyage explicite du cache Streamlit
+    # On vide explicitement le cache data
     st.cache_data.clear()
 
+# Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
 def nettoyer_titre(titre):
-    # Normalisation robuste du titre vers un nom de fichier ASCII sûr et court
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -46,15 +46,15 @@ def nettoyer_titre(titre):
     titre = re.sub(r'\s+', '_', titre.strip())
     if not titre:
         titre = "video"
-    # Raccourcissement strict
     return titre[:LONGUEUR_TITRE_MAX]
 
+# Génération d’un préfixe court et stable <id8>_<titreCourt>
 def generer_nom_base(video_id, titre):
-    # Construit un préfixe très court et stable: <id8>_<titreCourt>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
 
+# Vérification de la présence de ffmpeg dans l'environnement
 def ffmpeg_disponible():
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -62,8 +62,8 @@ def ffmpeg_disponible():
     except Exception:
         return False
 
+# Renommage atomique en évitant toute collision
 def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
-    # Renommage atomique en évitant toute collision
     candidat = dest_path_base + ext
     i = 1
     while os.path.exists(candidat):
@@ -72,22 +72,23 @@ def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
     shutil.move(src_path, candidat)
     return candidat
 
+# Taille de fichier en octets
 def taille_fichier(path):
     try:
         return os.path.getsize(path)
     except Exception:
         return None
 
+# Liste des fichiers selon patterns
 def lister_fichiers(patterns):
-    # Retourne une liste de chemins correspondant à une liste de patterns glob
     files = []
     for p in patterns:
         files.extend(glob.glob(p))
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
+# Création d’un ZIP en mémoire
 def zipper_dossier(dossier, nom_zip_sans_ext="ressources"):
-    # Crée un ZIP en mémoire avec tout le contenu d'un dossier
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(dossier):
@@ -98,39 +99,34 @@ def zipper_dossier(dossier, nom_zip_sans_ext="ressources"):
     buffer.seek(0)
     return buffer, f"{nom_zip_sans_ext}.zip"
 
+# Affichage vidéo sans jamais appeler st.video(path)
 def afficher_video_securisee(video_path):
-    # Affichage SANS JAMAIS appeler st.video(path). On passe des bytes à st.video, ou on propose un téléchargement.
     if not os.path.exists(video_path):
-        st.error(f"Fichier vidéo introuvable : {video_path}")
         return
     size = taille_fichier(video_path)
-    if size is None:
-        st.error("Impossible de déterminer la taille du fichier vidéo.")
-        return
-    if size > SEUIL_APERCU_OCTETS:
-        st.info("La vidéo est volumineuse pour un aperçu direct. Utilisez le bouton « Télécharger » ci-dessous.")
+    if size is None or size > SEUIL_APERCU_OCTETS:
         return
     try:
         with open(video_path, "rb") as f:
             data = f.read()
         st.video(data, format="video/mp4")
-    except Exception as e:
-        st.warning(f"Aperçu vidéo indisponible. Utilisez le bouton « Télécharger ». Détail : {e}")
+    except Exception:
+        pass
 
-def preparer_telechargement_unique(video_path, interval_dir, nom_zip="ressources_intervalle"):
-    # Prépare la charge utile d’un SEUL bouton « Télécharger » :
-    # - si des ressources existent dans ressources_intervalle : on propose un ZIP
-    # - sinon on propose la vidéo compressée
+# Préparation du contenu pour le bouton unique « Télécharger »
+def preparer_un_seul_telechargement(video_path, interval_dir, nom_zip="ressources_intervalle"):
+    # Si des ressources existent dans ressources_intervalle : fournir un ZIP
     fichiers_intervalle = lister_fichiers([
         os.path.join(interval_dir, "*.mp4"),
         os.path.join(interval_dir, "*.mp3"),
         os.path.join(interval_dir, "*.wav"),
+        os.path.join(interval_dir, "img*", "*.jpg"),
         os.path.join(interval_dir, "images_*", "*.jpg")
     ])
     if fichiers_intervalle:
         buffer_zip, nom_zip_f = zipper_dossier(interval_dir, nom_zip)
         return buffer_zip, nom_zip_f, "application/zip"
-    # sinon, proposer la vidéo compressée
+    # Sinon, proposer la vidéo compressée si elle existe
     if video_path and os.path.exists(video_path):
         try:
             with open(video_path, "rb") as f:
@@ -138,7 +134,7 @@ def preparer_telechargement_unique(video_path, interval_dir, nom_zip="ressources
             return data, os.path.basename(video_path), "video/mp4"
         except Exception:
             pass
-    # défaut: ZIP vide pour éviter de ne rien proposer
+    # Défaut: petit zip vide pour éviter de ne rien proposer
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         pass
@@ -167,8 +163,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
 
     base_opts = {
         'paths': {'home': repertoire},
-        # Sortie initiale par ID pour éviter tout caractère exotique; on renomme ensuite court
-        'outtmpl': {'default': '%(id)s.%(ext)s'},
+        'outtmpl': {'default': '%(id)s.%(ext)s'},  # d’abord sur l’ID, puis renommer court
         'noplaylist': True,
         'quiet': not verbose,
         'no_warnings': not verbose,
@@ -205,7 +200,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                _ = ydl.prepare_filename(info)  # chemin attendu basé sur l’ID
+                _ = ydl.prepare_filename(info)
             candidats = lister_fichiers([os.path.join(repertoire, f"*.{ext}") for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']])
             if not candidats:
                 raise DownloadError("Téléchargement terminé mais aucun fichier détecté (download is empty).")
@@ -221,7 +216,6 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
             msg += " — HTTP 403 détecté. Fournis un cookies.txt (format Netscape) exporté de ton navigateur."
         return None, None, None, msg
 
-    # Raccourci de nom: base très courte = <id8>_<titreCourt>
     video_id = (info.get('id') if info else "vid") or "vid"
     titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
     base_court = generer_nom_base(video_id, titre_brut)
@@ -231,7 +225,7 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
     src_base = os.path.join(repertoire, f"{base_court}_src")
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    # Cible finale compressée très courte
+    # Cible finale compressée (nom court)
     compressed_base = os.path.join(repertoire, f"{base_court}_cmp")
     compressed_target = compressed_base + ".mp4"
     if os.path.exists(compressed_target):
@@ -259,7 +253,6 @@ def telecharger_video(url, repertoire, cookies_path=None, verbose=False):
         except Exception:
             pass
 
-    # On renvoie aussi un titre court à réutiliser pour nommer les extraits
     return compressed_target, base_court, info, None
 
 # ---------------- Extraction des ressources ----------------
@@ -313,10 +306,13 @@ st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
 
 vider_cache()
 
-st.markdown("""
-Entrez une URL YouTube ou importez un fichier mp4. La vidéo est compressée (1280px, CRF 28, AAC 96kbps) et enregistrée dans **ressources_globale**. 
-Vous pouvez ensuite définir un intervalle d'extraction et choisir les ressources à extraire dans **ressources_intervalle**.
-""")
+# Texte d’intro avec lien vers l’extension Firefox pour cookies.txt
+st.markdown(
+    "Entrez une URL YouTube ou importez un fichier mp4. La vidéo est compressée (1280px, CRF 28, AAC 96kbps) et enregistrée dans **ressources_globale**. "
+    "Vous pouvez ensuite définir un intervalle d'extraction et choisir les ressources à extraire dans **ressources_intervalle**. "
+    "Si la vidéo est restreinte, exportez vos cookies au format Netscape via l’extension Firefox "
+    "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
+)
 
 # URL puis cookies juste en dessous
 url = st.text_input("Entrez l'URL de la vidéo YouTube :")
@@ -347,7 +343,6 @@ if st.button("Lancer le téléchargement"):
             st.session_state['base_court'] = base_court
             st.success(f"Vidéo compressée enregistrée : {os.path.basename(video_path)}")
     elif fichier_local:
-        # Compression locale avec nom très court
         titre_net = nettoyer_titre(os.path.splitext(fichier_local.name)[0])
         base_court = generer_nom_base("local", titre_net)
         original_path = os.path.join(repertoire_globale, f"{base_court}_src.mp4")
@@ -374,13 +369,12 @@ if st.button("Lancer le téléchargement"):
     else:
         st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-# Affichage, extraction et téléchargement unique si vidéo présente
+# Affichage, extraction et bouton unique « Télécharger »
 if 'video_path' in st.session_state and os.path.exists(st.session_state['video_path']):
     st.markdown("---")
     afficher_video_securisee(st.session_state['video_path'])
 
     st.subheader("Paramètres d'extraction (ressources_intervalle)")
-
     col1, col2 = st.columns(2)
     debut = col1.number_input("Début (en secondes)", min_value=0, value=0)
     fin = col2.number_input("Fin (en secondes)", min_value=1, value=10)
@@ -414,10 +408,8 @@ if 'video_path' in st.session_state and os.path.exists(st.session_state['video_p
             st.success("Ressources extraites dans le répertoire ressources_intervalle.")
 
     st.markdown("---")
-    # Un SEUL bouton « Télécharger » :
-    # - Si des ressources existent, il télécharge le ZIP des ressources_intervalle
-    # - Sinon, il télécharge la vidéo compressée
-    data_dl, nom_dl, mime_dl = preparer_telechargement_unique(
+    # Un SEUL bouton « Télécharger » : ressources ZIP si dispo, sinon vidéo compressée
+    data_dl, nom_dl, mime_dl = preparer_un_seul_telechargement(
         st.session_state['video_path'],
         repertoire_intervalle,
         nom_zip="ressources_intervalle"
