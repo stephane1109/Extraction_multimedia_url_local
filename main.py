@@ -12,11 +12,32 @@ import unicodedata
 import shutil
 import zipfile
 from io import BytesIO
-import shutil as _shutil
+import importlib.util
+import pathlib
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from timelapse import generer_timelapse, binaire_ffmpeg, binaire_ffprobe
+# ---------------- Import résilient de timelapse.py ----------------
+def _import_timelapse_resilient():
+    """
+    Tente d'importer timelapse.py par import standard, sinon par chemin absolu.
+    Lève l'exception d'origine si tout échoue.
+    """
+    try:
+        from timelapse import generer_timelapse, binaire_ffmpeg, binaire_ffprobe
+        return generer_timelapse, binaire_ffmpeg, binaire_ffprobe
+    except Exception:
+        # Chargement dynamique par chemin
+        here = pathlib.Path(__file__).parent
+        mod_path = here / "timelapse.py"
+        if mod_path.exists():
+            spec = importlib.util.spec_from_file_location("timelapse_dynamic", str(mod_path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # peut lever si timelapse.py a une erreur
+            return mod.generer_timelapse, mod.binaire_ffmpeg, mod.binaire_ffprobe
+        raise  # timelapse.py est absent: on relance l'erreur initiale
+
+generer_timelapse, binaire_ffmpeg, binaire_ffprobe = _import_timelapse_resilient()
 
 # ---------------- Constantes ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
@@ -31,11 +52,8 @@ def vider_cache():
     # Vide explicitement le cache Streamlit
     st.cache_data.clear()
 
-def _which(path_name):
-    return _shutil.which(path_name)
-
 def ffmpeg_disponible():
-    # Teste via détection robuste
+    # Test via détection robuste
     try:
         _ = binaire_ffmpeg()
         _ = binaire_ffprobe()
