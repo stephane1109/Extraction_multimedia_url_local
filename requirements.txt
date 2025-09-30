@@ -2,3 +2,4 @@ streamlit
 yt_dlp
 ffmpeg-python
 opencv-python-headless
+numpy
