@@ -1,6 +1,10 @@
+
 # timelapse.py
-# Module timelapse SANS optical flow : extraction robuste avec reprise, construction vidéo finale.
-# Toutes les écritures se font sous /tmp/appdata pour éviter tout trigger de reload.
+# Module timelapse SANS optical flow, robustifié :
+# - debut/fin deviennent optionnels (par défaut: None)
+# - reprise d’extraction par lots
+# - ré-encodage H.264 + faststart si ffmpeg dispo
+# - cache sous /tmp/appdata (pas de reload Streamlit)
 
 import os
 import cv2
@@ -20,10 +24,6 @@ TIMELAPSE_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------- Détection / fallback ffmpeg ----------------
 
 def _telecharger_ffmpeg_statique(dest_dir: Path) -> str:
-    """
-    Télécharge un build statique ffmpeg amd64 et renvoie le chemin du binaire.
-    Attention : nécessite l’accès réseau côté plateforme.
-    """
     import urllib.request
     dest_dir.mkdir(parents=True, exist_ok=True)
     url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
@@ -40,13 +40,6 @@ def _telecharger_ffmpeg_statique(dest_dir: Path) -> str:
     raise RuntimeError("Binaire ffmpeg introuvable après extraction.")
 
 def _resoudre_binaire(nom_env: str, nom: str) -> Optional[str]:
-    """
-    Recherche un binaire :
-    1) variable d’environnement
-    2) shutil.which
-    3) imageio-ffmpeg
-    4) cache statique sous /tmp/appdata/ffmpeg-bin, sinon téléchargement
-    """
     import shutil as _sh
     cand = os.environ.get(nom_env)
     if cand and Path(cand).exists():
@@ -71,9 +64,6 @@ def _resoudre_binaire(nom_env: str, nom: str) -> Optional[str]:
         return None
 
 def chemin_ffmpeg() -> str:
-    """
-    Renvoie le chemin ffmpeg, lève RuntimeError si introuvable et téléchargement impossible.
-    """
     p = _resoudre_binaire("FFMPEG_BINARY", "ffmpeg")
     if not p:
         raise RuntimeError("ffmpeg introuvable et fallback impossible (réseau bloqué ?).")
@@ -81,11 +71,11 @@ def chemin_ffmpeg() -> str:
 
 # ---------------- Utilitaires timelapse ----------------
 
-def progres_path(job_dir: Path) -> Path:
+def _progress_path(job_dir: Path) -> Path:
     return job_dir / "progress.json"
 
-def charger_progress(job_dir: Path) -> dict:
-    p = progres_path(job_dir)
+def _charger_progress(job_dir: Path) -> dict:
+    p = _progress_path(job_dir)
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
@@ -93,14 +83,11 @@ def charger_progress(job_dir: Path) -> dict:
             return {}
     return {}
 
-def sauver_progress(job_dir: Path, d: dict) -> None:
-    p = progres_path(job_dir)
+def _sauver_progress(job_dir: Path, d: dict) -> None:
+    p = _progress_path(job_dir)
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) -> Tuple[cv2.VideoCapture, float, int, int]:
-    """
-    Ouvre la vidéo avec OpenCV et renvoie (cap, fps, frame_start, frame_end).
-    """
+def _ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) -> Tuple[cv2.VideoCapture, float, int, int]:
     cap = cv2.VideoCapture(chemin_video)
     if not cap.isOpened():
         raise RuntimeError("Impossible d’ouvrir la vidéo source (OpenCV).")
@@ -116,16 +103,12 @@ def ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) 
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
     return cap, float(fps), frame_start, frame_end
 
-def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
-                                 debut: Optional[int], fin: Optional[int], batch_frames: int = 1200) -> Tuple[int, int]:
-    """
-    Parcourt la vidéo par lots, échantillonne à fps_cible et sauve dans job_dir/images en reprenant si besoin.
-    Retourne (fps_source_arrondi, nb_images_total).
-    """
+def _extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
+                                  debut: Optional[int], fin: Optional[int], batch_frames: int = 1200) -> Tuple[int, int]:
     images_dir = job_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
-    cap, fps, frame_start, frame_end = ouvrir_capture(src_path, debut, fin)
+    cap, fps, frame_start, frame_end = _ouvrir_capture(src_path, debut, fin)
     ratio_saut = max(1, int(round(fps / float(fps_cible))))
 
     existantes = sorted(images_dir.glob("frame_*.jpg"))
@@ -160,7 +143,7 @@ def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
             cv2.imwrite(str(images_dir / f"frame_{total:06d}.jpg"), img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
             total += 1
 
-        sauver_progress(job_dir, {
+        _sauver_progress(job_dir, {
             "fps_source": fps,
             "frame_start": frame_start,
             "frame_end": frame_end,
@@ -172,11 +155,7 @@ def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
     cap.release()
     return int(round(fps)), total
 
-def construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: str) -> str:
-    """
-    Construit la vidéo MP4 à partir des JPEG du job (writer OpenCV),
-    puis reconditionne en H.264 + faststart si ffmpeg est disponible.
-    """
+def _construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: str) -> str:
     images_dir = job_dir / "images"
     fichiers = sorted(images_dir.glob("frame_*.jpg"))
     if not fichiers:
@@ -217,12 +196,13 @@ def construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: str
         return str(out_brut)
 
 def executer_timelapse(src_path: str, job_id: str, base_nom: str, fps: int,
-                       debut: Optional[int], fin: Optional[int]) -> Tuple[str, int]:
+                       debut: Optional[int] = None, fin: Optional[int] = None) -> Tuple[str, int]:
     """
     Exécute le pipeline timelapse avec reprise. Renvoie (chemin_fichier_final, nb_images).
+    debut et fin sont optionnels ; si None => toute la vidéo.
     """
     job_dir = TIMELAPSE_DIR / f"job_{job_id}"
     (job_dir / "images").mkdir(parents=True, exist_ok=True)
-    fps_src, nb = extraire_images_avec_reprise(src_path, job_dir, fps, debut, fin)
-    out = construire_video_depuis_images(job_dir, fps, base_nom)
+    fps_src, nb = _extraire_images_avec_reprise(src_path, job_dir, fps, debut, fin)
+    out = _construire_video_depuis_images(job_dir, fps, base_nom)
     return out, nb
