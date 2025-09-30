@@ -224,6 +224,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
 
     # Préparer la vidéo de travail
     cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
+
     def _run_ffmpeg(args):
         subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -319,6 +320,9 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
                         else:
                             frame_in_sec = int(round((t_sec_float - sec) * fps))
                             nom_cible = f"i_{sec}s_{fps}fps_{frame_in_sec:02d}.jpg"
+                            if frame_in_sec >= fps:
+                                frame_in_sec = fps - 1
+                                nom_cible = f"i_{sec}s_{fps}fps_{frame_in_sec:02d}.jpg"
                         dst = os.path.join(rep, nom_cible)
                         j = 1
                         base_dst, ext = os.path.splitext(dst)
@@ -331,7 +335,7 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
     except Exception as e:
         return str(e)
 
-# ---------------- Interface utilisateur ----------------
+# ---------------- Interface utilisateur (sans st.form, UI réactive) ----------------
 
 st.title("Extraction multimédia (vidéo, audio, images)")
 st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
@@ -346,74 +350,64 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Valeurs d’intervalle par défaut (persistées)
-if "debut_secs" not in st.session_state:
-    st.session_state["debut_secs"] = 0
-if "fin_secs" not in st.session_state:
-    st.session_state["fin_secs"] = 10
+# États initiaux
+st.session_state.setdefault("debut_secs", 0)
+st.session_state.setdefault("fin_secs", 10)
+st.session_state.setdefault("local_temp_path", None)
+st.session_state.setdefault("local_name_base", None)
+st.session_state.setdefault("video_base", None)
+st.session_state.setdefault("base_court", None)
+st.session_state.setdefault("apercu_local_bytes", None)
+st.session_state.setdefault("upload_signature", None)
 
-# Formulaire unique
-with st.form(key="form_traitement", clear_on_submit=False):
-    url = st.text_input("URL YouTube")
-    cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
-    fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
-    mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
-    qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
+# Source
+url = st.text_input("URL YouTube")
+cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
+fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
 
-    st.subheader("Ressources à produire")
-    st.markdown("<style>div[data-testid='stHorizontalBlock'] label { white-space: nowrap; }</style>", unsafe_allow_html=True)
-    c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
-    with c1: opt_mp4 = st.checkbox("MP4", key="opt_mp4")
-    with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3")
-    with c3: opt_wav = st.checkbox("WAV", key="opt_wav")
-    with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
-    with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
-    with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
+mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
+qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
 
-    if opt_timelapse:
-        col_t1, col_t2 = st.columns([1,1])
-        with col_t1:
-            fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
-        with col_t2:
-            opt_flow = st.checkbox("Flux optique (overlay)", value=False, key="opt_flow")
-    else:
-        fps_timelapse = 12
-        opt_flow = False
+# Ressources
+st.subheader("Ressources à produire")
+st.markdown("<style>div[data-testid='stHorizontalBlock'] label { white-space: nowrap; }</style>", unsafe_allow_html=True)
+c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
+with c1: opt_mp4 = st.checkbox("MP4", key="opt_mp4")
+with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3")
+with c3: opt_wav = st.checkbox("WAV", key="opt_wav")
+with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
+with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
+with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-    st.subheader("Étendue")
-    etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
+# Options Timelapse visibles immédiatement
+if opt_timelapse:
+    col_t1, col_t2 = st.columns([1,1])
+    with col_t1:
+        fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
+    with col_t2:
+        opt_flow = st.checkbox("Flux optique (overlay)", value=False, key="opt_flow")
+else:
+    fps_timelapse = 12
+    opt_flow = False
 
-    if etendue == "Intervalle personnalisé":
-        st.info(f"Intervalle personnalisé activé : de {st.session_state['debut_secs']}s à {st.session_state['fin_secs']}s. Le téléchargement traitera uniquement cet intervalle.")
-        cc1, cc2 = st.columns(2)
-        debut = cc1.number_input("Début (s)", min_value=0, value=st.session_state["debut_secs"], key="debut_secs")
-        fin = cc2.number_input("Fin (s)", min_value=1, value=st.session_state["fin_secs"], key="fin_secs")
-        utiliser_intervalle = True
-        if fin <= debut:
-            st.warning("La fin doit être strictement supérieure au début.")
-    else:
-        debut, fin, utiliser_intervalle = 0, 0, False
+# Étendue
+st.subheader("Étendue")
+etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
+if etendue == "Intervalle personnalisé":
+    st.info(f"Intervalle personnalisé activé : de {st.session_state['debut_secs']}s à {st.session_state['fin_secs']}s. Le téléchargement traitera uniquement cet intervalle.")
+    cc1, cc2 = st.columns(2)
+    st.session_state["debut_secs"] = cc1.number_input("Début (s)", min_value=0, value=st.session_state["debut_secs"])
+    st.session_state["fin_secs"] = cc2.number_input("Fin (s)", min_value=1, value=st.session_state["fin_secs"])
+    utiliser_intervalle = True
+    if st.session_state["fin_secs"] <= st.session_state["debut_secs"]:
+        st.warning("La fin doit être strictement supérieure au début.")
+else:
+    utiliser_intervalle = False
 
-    afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
-    submit = st.form_submit_button("Lancer le traitement")
+# Aperçu
+afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
 
-# État session et stabilisation de l’upload
-if 'local_temp_path' not in st.session_state:
-    st.session_state['local_temp_path'] = None
-if 'local_name_base' not in st.session_state:
-    st.session_state['local_name_base'] = None
-if 'video_base' not in st.session_state:
-    st.session_state['video_base'] = None
-if 'base_court' not in st.session_state:
-    st.session_state['base_court'] = None
-if 'apercu_placeholder' not in st.session_state:
-    st.session_state['apercu_placeholder'] = st.empty()
-if 'apercu_local_bytes' not in st.session_state:
-    st.session_state['apercu_local_bytes'] = None
-if 'upload_signature' not in st.session_state:
-    st.session_state['upload_signature'] = None
-
-# Copie stable à chaque nouvel upload (signature = nom + taille)
+# Stabilisation upload local (réactive)
 if fichier_local is not None:
     signature = f"{fichier_local.name}-{fichier_local.size}"
     if signature != st.session_state['upload_signature']:
@@ -429,33 +423,32 @@ if fichier_local is not None:
             except Exception:
                 st.session_state['apercu_local_bytes'] = b""
 
-# Aperçu avant traitement (unique, sans doublon)
+# Affichage aperçu sans doublon
 if afficher_apercu:
     if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-        with st.session_state['apercu_placeholder']:
-            size = taille_fichier(st.session_state['video_base']) or 0
-            if size <= SEUIL_APERCU_OCTETS:
-                with open(st.session_state['video_base'], "rb") as f:
-                    st.video(f.read(), format="video/mp4")
+        size = taille_fichier(st.session_state['video_base']) or 0
+        if size <= SEUIL_APERCU_OCTETS:
+            with open(st.session_state['video_base'], "rb") as f:
+                st.video(f.read(), format="video/mp4")
     elif st.session_state.get('apercu_local_bytes'):
-        with st.session_state['apercu_placeholder']:
-            if st.session_state['apercu_local_bytes']:
-                st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
-            else:
-                st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
+        if st.session_state['apercu_local_bytes']:
+            st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
+        else:
+            st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# Traitement au submit
-if submit:
+# Bouton unique
+if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
+        # Cookies
         cookies_path = None
         if cookies_file is not None:
             cookies_path = os.path.join(REPERTOIRE_SORTIE, "cookies.txt")
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        # Préparation vidéo: URL ou local
+        # Préparer vidéo (URL ou local)
         if url:
             video_base, base_court, info, err = telecharger_preparer_video(
                 url, cookies_path, mode_verbose, qualite, utiliser_intervalle, st.session_state["debut_secs"], st.session_state["fin_secs"]
@@ -470,8 +463,10 @@ if submit:
             base_court = st.session_state.get('local_name_base') or generer_nom_base("local", "video")
             src_local = st.session_state['local_temp_path']
             cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
+
             def _run_ffmpeg(args):
                 subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
             try:
                 if qualite == "Compressée (1280p, CRF 28)":
                     if utiliser_intervalle:
@@ -517,10 +512,15 @@ if submit:
         else:
             st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-        # Extraction et timelapse
+        # Extraction + Timelapse
         if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-            debut_eff = st.session_state["debut_secs"] if utiliser_intervalle else 0
-            fin_eff = st.session_state["fin_secs"] if utiliser_intervalle else (duree_video_seconds(st.session_state['video_base']) or 0)
+            if utiliser_intervalle:
+                debut_eff = st.session_state["debut_secs"]
+                fin_eff = st.session_state["fin_secs"]
+            else:
+                duree = duree_video_seconds(st.session_state['video_base']) or 0
+                debut_eff, fin_eff = 0, duree
+
             options = {"mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
             if any(options.values()):
                 err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, st.session_state['base_court'], options, utiliser_intervalle)
@@ -539,7 +539,7 @@ if submit:
                 except Exception as e:
                     st.error(f"Echec du timelapse : {e}")
 
-# Aperçu après traitement + téléchargement ZIP
+# Téléchargement final unique
 if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
