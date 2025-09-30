@@ -1,4 +1,4 @@
-# pip install streamlit yt_dlp opencv-python-headless
+# pip install streamlit yt_dlp opencv-python-headless imageio-ffmpeg numpy
 
 # ---------------- Imports ----------------
 import os
@@ -14,6 +14,7 @@ import zipfile
 from io import BytesIO
 import importlib.util
 import pathlib
+import cv2
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -21,18 +22,18 @@ from yt_dlp.utils import DownloadError
 def _import_timelapse_resilient():
     here = pathlib.Path(__file__).parent
     try:
-        from timelapse import generer_timelapse, chemin_ffmpeg, chemin_ffprobe
-        return generer_timelapse, chemin_ffmpeg, chemin_ffprobe
+        from timelapse import generer_timelapse, chemin_ffmpeg
+        return generer_timelapse, chemin_ffmpeg
     except Exception:
         mod_path = here / "timelapse.py"
         if mod_path.exists():
             spec = importlib.util.spec_from_file_location("timelapse_dynamic", str(mod_path))
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            return mod.generer_timelapse, mod.chemin_ffmpeg, mod.chemin_ffprobe
+            return mod.generer_timelapse, mod.chemin_ffmpeg
         raise
 
-generer_timelapse, chemin_ffmpeg, chemin_ffprobe = _import_timelapse_resilient()
+generer_timelapse, chemin_ffmpeg = _import_timelapse_resilient()
 
 # ---------------- Constantes ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
@@ -49,7 +50,6 @@ def vider_cache():
 def ffmpeg_disponible():
     try:
         _ = chemin_ffmpeg()
-        _ = chemin_ffprobe()
         return True
     except Exception:
         return False
@@ -110,14 +110,19 @@ def zipper_fichiers(fichiers, nom_zip_sans_ext):
     return buffer, f"{nom_zip_sans_ext}.zip"
 
 def duree_video_seconds(video_path):
+    """
+    Calcule la durée sans ffprobe, via OpenCV (fallback universel).
+    """
     try:
-        ffprobe = chemin_ffprobe()
-        res = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True, check=True
-        )
-        return int(float(res.stdout.strip()))
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.release()
+        if fps > 0:
+            return int(round(frames / fps))
+        return None
     except Exception:
         return None
 
@@ -356,10 +361,12 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Panneau de diagnostic (optionnel)
+# Panneau de diagnostic minimal
 with st.expander("Diagnostic système"):
-    st.write("ffmpeg :", chemin_ffmpeg() if ffmpeg_disponible() else "introuvable")
-    st.write("ffprobe :", (chemin_ffprobe() if ffmpeg_disponible() else "introuvable"))
+    try:
+        st.write(f"ffmpeg : {chemin_ffmpeg()}")
+    except Exception:
+        st.write("ffmpeg : introuvable")
 
 # Etats initiaux
 st.session_state.setdefault("debut_secs", 0)
@@ -390,7 +397,7 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-# Timelapse options
+# Timelapse options visibles immédiatement
 if opt_timelapse:
     col_t1, col_t2 = st.columns([1,1])
     with col_t1:
@@ -459,9 +466,9 @@ if st.button("Lancer le traitement"):
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        # Vérif binaire
+        # Vérif ffmpeg (avec fallback imageio-ffmpeg)
         if not ffmpeg_disponible():
-            st.error("ffmpeg/ffprobe introuvables. Ajoute 'ffmpeg' dans packages.txt ou renseigne $FFMPEG_BINARY et $FFPROBE_BINARY.")
+            st.error("ffmpeg introuvable et fallback impossible. Ajoute 'imageio-ffmpeg' dans requirements.txt ou définis $FFMPEG_BINARY.")
         else:
             # Préparer vidéo (URL ou local)
             if url:
