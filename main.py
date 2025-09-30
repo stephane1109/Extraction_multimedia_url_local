@@ -1,10 +1,6 @@
 # main.py
-# Application complète sans optical flow, correctif exclusivité Timelapse :
-# - AUCUNE écriture programmatique dans st.session_state pour « décocher » des widgets.
-# - L’exclusivité « Timelapse » est gérée logiquement : si Timelapse est coché, on ignore MP4/MP3/WAV/Images.
-# - Un seul bouton, intervalle optionnel (par défaut toute la vidéo), cookies persistants (cookies.py),
-#   choix Compressée/HD, timelapse export seul avec reprise, numérotation images,
-#   zip final, aperçu sans doublon.
+# Application complète sans optical flow (et tolérante si un ancien état UI passerait avec_flow).
+# Exclusivité Timelapse gérée logiquement, sans écriture forcée dans session_state.
 
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -24,7 +20,7 @@ import cv2
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# -------- Imports modules locaux --------
+# -------- Imports locaux --------
 
 def _import_timelapse():
     try:
@@ -50,7 +46,7 @@ def _import_cookies():
 
 ck = _import_cookies()
 
-# -------- Répertoires de travail --------
+# -------- Répertoires --------
 
 BASE_DIR = Path("/tmp/appdata")
 REPERTOIRE_SORTIE = BASE_DIR / "fichiers"
@@ -62,7 +58,7 @@ SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
 LONGUEUR_TITRE_MAX = 24
 LONGUEUR_PREFIX_ID = 8
 
-# -------- Utilitaires généraux --------
+# -------- Utilitaires --------
 
 def vider_cache():
     st.cache_data.clear()
@@ -394,7 +390,7 @@ def extraire_ressources(video_path: str, debut: int, fin: int, base_court: str, 
 
     return None
 
-# -------- Interface utilisateur --------
+# ---------------- Interface utilisateur ----------------
 
 st.title("Extraction multimédia (vidéo, audio, images)")
 st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
@@ -450,7 +446,7 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-# Exclusivité SANS modifier session_state : on calcule des options effectives
+# Exclusivité logique (pas de modification forcée de l’état UI)
 if opt_timelapse:
     st.info("Mode timelapse activé : aucune prévisualisation, l’application génère uniquement le fichier timelapse à télécharger.")
     fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
@@ -547,6 +543,7 @@ if st.button("Lancer le traitement"):
                             video_path, job_id, base_court, st.session_state.get("fps_timelapse", 12),
                             debut=st.session_state["debut_secs"] if utiliser_intervalle else None,
                             fin=st.session_state["fin_secs"] if utiliser_intervalle else None
+                            # aucun avec_flow ; et si présent, timelapse.py l'ignore via **kwargs
                         )
                         st.success(f"Timelapse généré ({nb_images} images).")
                         with open(out_path, "rb") as fh:
