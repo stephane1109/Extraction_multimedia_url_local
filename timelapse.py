@@ -1,19 +1,28 @@
 # timelapse.py
-# ---------------- Imports ----------------
+# Module timelapse : extraction robuste avec reprise, construction vidéo finale
+# Toutes les écritures se font sous /tmp/appdata pour éviter tout trigger de reload.
+
 import os
 import cv2
 import subprocess
 import shutil
 import stat
 import tarfile
+import time
+import json
 from pathlib import Path
+from typing import Optional, Tuple, List
 
-# ---------------- Fallback ffmpeg (env -> which -> imageio-ffmpeg -> binaire statique) ----------------
+BASE_DIR = Path("/tmp/appdata")
+TIMELAPSE_DIR = BASE_DIR / "timelapse_jobs"
+TIMELAPSE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------- Détection / fallback ffmpeg ----------------
 
 def _telecharger_ffmpeg_statique(dest_dir: Path) -> str:
     """
     Télécharge un build statique ffmpeg amd64 et renvoie le chemin du binaire.
-    ATTENTION : nécessite l’accès réseau côté plateforme.
+    Attention : nécessite l’accès réseau côté plateforme.
     """
     import urllib.request
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -30,60 +39,71 @@ def _telecharger_ffmpeg_statique(dest_dir: Path) -> str:
         return str(p)
     raise RuntimeError("Binaire ffmpeg introuvable après extraction.")
 
-def _resoudre_binaire(nom_env, nom, chemins_standards=("/usr/bin", "/usr/local/bin", "/bin")):
+def _resoudre_binaire(nom_env: str, nom: str) -> Optional[str]:
     """
     Recherche un binaire :
     1) variable d’environnement
     2) shutil.which
-    3) chemins standards
-    4) imageio-ffmpeg
-    5) téléchargement d’un build statique dans /tmp/appdata/ffmpeg-bin
+    3) imageio-ffmpeg
+    4) cache statique sous /tmp/appdata/ffmpeg-bin, sinon téléchargement
     """
-    cand_env = os.environ.get(nom_env)
-    if cand_env and os.path.exists(cand_env):
-        return cand_env
-    cand = shutil.which(nom)
-    if cand:
+    cand = os.environ.get(nom_env)
+    if cand and Path(cand).exists():
         return cand
-    for d in chemins_standards:
-        p = os.path.join(d, nom)
-        if os.path.exists(p):
-            return p
+    which = shutil.which(nom)
+    if which:
+        return which
     try:
         import imageio_ffmpeg
         p = imageio_ffmpeg.get_ffmpeg_exe()
-        if p and os.path.exists(p):
+        if p and Path(p).exists():
             return p
     except Exception:
         pass
+    cache_dir = BASE_DIR / "ffmpeg-bin"
+    for p in cache_dir.glob("ffmpeg-*-amd64-static/ffmpeg"):
+        if p.exists():
+            return str(p)
     try:
-        cache_dir = Path("/tmp/appdata/ffmpeg-bin")
-        for p in cache_dir.glob("ffmpeg-*-amd64-static/ffmpeg"):
-            if p.exists():
-                return str(p)
         return _telecharger_ffmpeg_statique(cache_dir)
     except Exception:
         return None
 
-def chemin_ffmpeg():
+def chemin_ffmpeg() -> str:
     """
-    Retourne un chemin exécutable vers ffmpeg, sinon lève RuntimeError.
+    Renvoie le chemin ffmpeg, lève RuntimeError si introuvable et téléchargement impossible.
     """
     p = _resoudre_binaire("FFMPEG_BINARY", "ffmpeg")
     if not p:
         raise RuntimeError("ffmpeg introuvable et fallback impossible (réseau bloqué ?).")
     return p
 
-# ---------------- Timelapse ----------------
+# ---------------- Utilitaires timelapse ----------------
 
-def appliquer_optical_flow(images):
+def progres_path(job_dir: Path) -> Path:
+    return job_dir / "progress.json"
+
+def charger_progress(job_dir: Path) -> dict:
+    p = progres_path(job_dir)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def sauver_progress(job_dir: Path, d: dict) -> None:
+    p = progres_path(job_dir)
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def appliquer_optical_flow(images: List) -> List:
     """
-    Applique la visualisation du flux optique sur des images successives.
+    Ajoute un overlay du flux optique entre images successives (visualisation vecteurs).
     """
-    images_avec_flow = []
+    out = []
     for i in range(len(images) - 1):
         img1 = cv2.cvtColor(images[i], cv2.COLOR_BGR2GRAY)
-        img2 = cv2.cvtColor(images[i + 1], cv2.COLOR_BGR2GRAY)
+        img2 = cv2.cvtColor(images[i+1], cv2.COLOR_BGR2GRAY)
         flow = cv2.calcOpticalFlowFarneback(img1, img2, None, 0.5, 3, 15, 3, 5, 1.2, 0)
         vis = images[i].copy()
         h, w = img1.shape
@@ -92,83 +112,140 @@ def appliquer_optical_flow(images):
             for x in range(0, w, step):
                 fx, fy = flow[y, x]
                 cv2.arrowedLine(vis, (x, y), (int(x + fx), int(y + fy)), (0, 255, 0), 1, tipLength=0.4)
-        images_avec_flow.append(vis)
-    if len(images) > 0:
-        images_avec_flow.append(images[-1])
-    return images_avec_flow
+        out.append(vis)
+    if images:
+        out.append(images[-1])
+    return out
 
-def extraire_images_echantillonnees(chemin_video, dossier_sortie, fps_cible, avec_flow=False):
+def ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) -> Tuple[cv2.VideoCapture, float, int, int]:
     """
-    Extrait des images à intervalle régulier pour créer un timelapse (effet stop motion).
-    Retourne (fps_original, nb_images).
+    Ouvre la vidéo avec OpenCV et renvoie (cap, fps, frame_start, frame_end).
     """
     cap = cv2.VideoCapture(chemin_video)
     if not cap.isOpened():
-        raise RuntimeError("Impossible d’ouvrir la vidéo pour extraction des images.")
-    fps_original = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    ratio_saut = max(1, int(round(fps_original / float(fps_cible))))
-    images_extraites, index = [], 0
-    while True:
-        ok, image = cap.read()
-        if not ok:
-            break
-        if index % ratio_saut == 0:
-            images_extraites.append(image)
-        index += 1
-    cap.release()
-    if avec_flow and len(images_extraites) > 1:
-        images_extraites = appliquer_optical_flow(images_extraites)
-    os.makedirs(dossier_sortie, exist_ok=True)
-    for i, img in enumerate(images_extraites):
-        cv2.imwrite(os.path.join(dossier_sortie, f"image_{i:05d}.jpg"), img)
-    return int(round(fps_original)), len(images_extraites)
+        raise RuntimeError("Impossible d’ouvrir la vidéo source (OpenCV).")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    nb = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if debut is None: debut = 0
+    if fin is None or fin <= 0: fin = int(round(nb / fps))
+    if fin <= debut: fin = debut + 1
+    frame_start = int(round(debut * fps))
+    frame_end = min(nb, int(round(fin * fps)))
+    frame_start = max(0, frame_start)
+    frame_end = max(frame_start + 1, frame_end)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
+    return cap, float(fps), frame_start, frame_end
 
-def creer_video_depuis_images(dossier_images, chemin_sortie, fps=12):
+def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int, avec_flow: bool,
+                                 debut: Optional[int], fin: Optional[int], batch_frames: int = 1200) -> Tuple[int, int]:
     """
-    Construit une vidéo MP4 à partir des images JPEG d’un dossier.
+    Parcourt la vidéo par lots, échantillonne à fps_cible et sauve dans job_dir/images en reprenant si besoin.
+    Retourne (fps_source_arrondi, nb_images_total).
     """
-    fichiers = sorted([f for f in os.listdir(dossier_images) if f.endswith(".jpg")])
-    if not fichiers:
-        return None
-    image_exemple = cv2.imread(os.path.join(dossier_images, fichiers[0]))
-    if image_exemple is None:
-        return None
-    h, w, _ = image_exemple.shape
-    codec = cv2.VideoWriter_fourcc(*'mp4v')
-    video = cv2.VideoWriter(chemin_sortie, codec, fps, (w, h))
-    for f in fichiers:
-        img = cv2.imread(os.path.join(dossier_images, f))
-        if img is None:
+    images_dir = job_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+
+    cap, fps, frame_start, frame_end = ouvrir_capture(src_path, debut, fin)
+    ratio_saut = max(1, int(round(fps / float(fps_cible))))
+
+    existantes = sorted(images_dir.glob("frame_*.jpg"))
+    next_index = 0
+    if existantes:
+        try:
+            next_index = int(existantes[-1].stem.split("_")[1]) + 1
+        except Exception:
+            next_index = len(existantes)
+
+    frame_pos = frame_start + next_index * ratio_saut
+    if frame_pos < frame_end:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+
+    total = next_index
+    while frame_pos < frame_end:
+        courant = 0
+        lot = []
+        while courant < batch_frames and frame_pos < frame_end:
+            ok, img = cap.read()
+            if not ok:
+                break
+            if ((frame_pos - frame_start) % ratio_saut) == 0:
+                lot.append(img)
+            courant += 1
+            frame_pos += 1
+
+        if not lot:
             continue
-        if img.shape[:2] != (h, w):
-            img = cv2.resize(img, (w, h))
-        video.write(img)
-    video.release()
-    return chemin_sortie
 
-def reencoder_video_h264(chemin_entree, chemin_sortie):
-    """
-    Réencode une vidéo en H.264 pour compatibilité maximale (lecteur web).
-    """
-    ffmpeg = chemin_ffmpeg()
-    subprocess.run(
-        [ffmpeg, "-y", "-i", chemin_entree, "-vcodec", "libx264", "-preset", "fast", "-crf", "23",
-         "-movflags", "+faststart", chemin_sortie],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
-    )
+        if avec_flow and len(lot) > 1:
+            lot = appliquer_optical_flow(lot)
 
-def generer_timelapse(chemin_video_source, dossier_sortie, base_court, fps_cible=12, avec_flow=False):
+        for img in lot:
+            cv2.imwrite(str(images_dir / f"frame_{total:06d}.jpg"), img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            total += 1
+
+        sauver_progress(job_dir, {
+            "fps_source": fps,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+            "ratio_saut": ratio_saut,
+            "images_sauvegardees": total
+        })
+        time.sleep(0.03)
+
+    cap.release()
+    return int(round(fps)), total
+
+def construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: str) -> str:
     """
-    Pipeline timelapse complet.
+    Construit la vidéo MP4 à partir des JPEG du job (writer OpenCV),
+    puis reconditionne en H.264 + faststart si ffmpeg est disponible.
     """
-    dossier_images = os.path.join(dossier_sortie, f"timelapse_{fps_cible}fps_{base_court}")
-    os.makedirs(dossier_images, exist_ok=True)
-    fps_origine, nb = extraire_images_echantillonnees(chemin_video_source, dossier_images, fps_cible, avec_flow=avec_flow)
-    if nb == 0:
-        raise RuntimeError("Aucune image extraite pour le timelapse.")
-    chemin_brut = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cible}fps_brut.mp4")
-    if creer_video_depuis_images(dossier_images, chemin_brut, fps=fps_cible) is None:
-        raise RuntimeError("Echec de la création de la vidéo timelapse brute.")
-    chemin_final = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cicle}fps.mp4".replace("{fps_cicle}", str(fps_cible)))
-    reencoder_video_h264(chemin_brut, chemin_final)
-    return chemin_final
+    images_dir = job_dir / "images"
+    fichiers = sorted(images_dir.glob("frame_*.jpg"))
+    if not fichiers:
+        raise RuntimeError("Aucune image prête pour le timelapse.")
+    img0 = cv2.imread(str(fichiers[0]))
+    if img0 is None:
+        raise RuntimeError("Impossible de lire la première image.")
+    h, w = img0.shape[:2]
+
+    out_brut = job_dir / f"{base_nom}_timelapse_{fps_sortie}fps_brut.mp4"
+    vw = cv2.VideoWriter(str(out_brut), cv2.VideoWriter_fourcc(*"mp4v"), fps_sortie, (w, h))
+    for fp in fichiers:
+        im = cv2.imread(str(fp))
+        if im is None:
+            continue
+        if im.shape[:2] != (h, w):
+            im = cv2.resize(im, (w, h))
+        vw.write(im)
+    vw.release()
+
+    out_final = job_dir / f"{base_nom}_timelapse_{fps_sortie}fps.mp4"
+    try:
+        ffmpeg = chemin_ffmpeg()
+    except Exception:
+        ffmpeg = None
+
+    if ffmpeg:
+        try:
+            subprocess.run(
+                [ffmpeg, "-y", "-i", str(out_brut), "-vcodec", "libx264", "-preset", "fast", "-crf", "23",
+                 "-movflags", "+faststart", str(out_final)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+            return str(out_final)
+        except Exception:
+            return str(out_brut)
+    else:
+        return str(out_brut)
+
+def executer_timelapse(src_path: str, job_id: str, base_nom: str, fps: int, avec_flow: bool,
+                       debut: Optional[int], fin: Optional[int]) -> Tuple[str, int]:
+    """
+    Exécute le pipeline timelapse avec reprise. Renvoie (chemin_fichier_final, nb_images).
+    """
+    job_dir = TIMELAPSE_DIR / f"job_{job_id}"
+    (job_dir / "images").mkdir(parents=True, exist_ok=True)
+    fps_src, nb = extraire_images_avec_reprise(src_path, job_dir, fps, avec_flow, debut, fin)
+    out = construire_video_depuis_images(job_dir, fps, base_nom)
+    return out, nb
