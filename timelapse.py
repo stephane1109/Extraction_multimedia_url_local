@@ -169,6 +169,6 @@ def generer_timelapse(chemin_video_source, dossier_sortie, base_court, fps_cible
     chemin_brut = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cible}fps_brut.mp4")
     if creer_video_depuis_images(dossier_images, chemin_brut, fps=fps_cible) is None:
         raise RuntimeError("Echec de la création de la vidéo timelapse brute.")
-    chemin_final = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cible}fps.mp4")
+    chemin_final = os.path.join(dossier_sortie, f"{base_court}_timelapse_{fps_cicle}fps.mp4".replace("{fps_cicle}", str(fps_cible)))
     reencoder_video_h264(chemin_brut, chemin_final)
     return chemin_final
