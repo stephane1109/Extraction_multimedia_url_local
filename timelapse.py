@@ -2,7 +2,6 @@
 # ---------------- Imports ----------------
 import os
 import cv2
-import glob
 import subprocess
 
 # ---------------- Fonctions ----------------
@@ -84,7 +83,8 @@ def creer_video_depuis_images(dossier_images, chemin_sortie, fps=12):
         img = cv2.imread(os.path.join(dossier_images, f))
         if img is None:
             continue
-        img = cv2.resize(img, (w, h))
+        if img.shape[0] != h or img.shape[1] != w:
+            img = cv2.resize(img, (w, h))
         video.write(img)
     video.release()
     return chemin_sortie
@@ -102,7 +102,12 @@ def reencoder_video_h264(chemin_entree, chemin_sortie):
         "-movflags", "+faststart",
         chemin_sortie
     ]
-    subprocess.run(commande, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    subprocess.run(
+        commande,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False
+    )
 
 def generer_timelapse(chemin_video_source, dossier_sortie, base_court, fps_cible=12, avec_flow=False):
     """
