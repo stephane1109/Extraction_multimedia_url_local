@@ -1,6 +1,9 @@
 # main.py
-# Application complète sans optical flow (et tolérante si un ancien état UI passerait avec_flow).
-# Exclusivité Timelapse gérée logiquement, sans écriture forcée dans session_state.
+# Application d’extraction multimédia (vidéo, audio, images) + timelapse.
+# Correctif demandé : si « Timelapse » est sélectionné, on produit UNIQUEMENT le timelapse.
+# Les cases MP4/MP3/WAV/Images sont alors désactivées pour rendre l’exclusivité explicite.
+# Aucune écriture forcée dans st.session_state pour décocher les widgets.
+# Toutes les fonctionnalités précédentes sont conservées.
 
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -20,7 +23,7 @@ import cv2
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# -------- Imports locaux --------
+# ---------------- Imports locaux ----------------
 
 def _import_timelapse():
     try:
@@ -46,7 +49,7 @@ def _import_cookies():
 
 ck = _import_cookies()
 
-# -------- Répertoires --------
+# ---------------- Répertoires ----------------
 
 BASE_DIR = Path("/tmp/appdata")
 REPERTOIRE_SORTIE = BASE_DIR / "fichiers"
@@ -54,16 +57,20 @@ REPERTOIRE_TEMP = BASE_DIR / "tmp"
 REPERTOIRE_SORTIE.mkdir(parents=True, exist_ok=True)
 REPERTOIRE_TEMP.mkdir(parents=True, exist_ok=True)
 
+# ---------------- Constantes UI / limites ----------------
+
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
 LONGUEUR_TITRE_MAX = 24
 LONGUEUR_PREFIX_ID = 8
 
-# -------- Utilitaires --------
+# ---------------- Utilitaires généraux ----------------
 
 def vider_cache():
+    # Nettoyage du cache Streamlit
     st.cache_data.clear()
 
 def ffmpeg_disponible() -> bool:
+    # Vérifie la disponibilité de ffmpeg via timelapse.chemin_ffmpeg()
     try:
         _ = tl.chemin_ffmpeg()
         return True
@@ -71,6 +78,7 @@ def ffmpeg_disponible() -> bool:
         return False
 
 def nettoyer_titre(titre: str) -> str:
+    # Normalise un titre en nom de fichier court et sûr
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -87,11 +95,13 @@ def nettoyer_titre(titre: str) -> str:
     return titre[:LONGUEUR_TITRE_MAX]
 
 def generer_nom_base(video_id: str, titre: str) -> str:
+    # Construit le préfixe de nom base : <id>_<titre-nettoyé>
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
 
 def renommer_sans_collision(src_path: Path, dest_path_base: Path, ext: str = ".mp4") -> Path:
+    # Déplace/renomme un fichier en évitant les collisions
     candidat = Path(f"{dest_path_base}{ext}")
     i = 1
     while candidat.exists():
@@ -101,12 +111,14 @@ def renommer_sans_collision(src_path: Path, dest_path_base: Path, ext: str = ".m
     return candidat
 
 def taille_fichier(p: Path):
+    # Taille d’un fichier (ou None)
     try:
         return p.stat().st_size
     except Exception:
         return None
 
 def duree_video_seconds(video_path: Path):
+    # Durée en secondes d’une vidéo via OpenCV
     try:
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -119,6 +131,7 @@ def duree_video_seconds(video_path: Path):
         return None
 
 def zipper_sur_disque(fichiers, chemin_zip: Path) -> Path:
+    # Crée un zip avec la liste de fichiers fournie
     with zipfile.ZipFile(str(chemin_zip), "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for f in fichiers:
             f = Path(f)
@@ -127,6 +140,7 @@ def zipper_sur_disque(fichiers, chemin_zip: Path) -> Path:
     return chemin_zip
 
 def lister_sorties(prefix: str):
+    # Liste l’ensemble des sorties correspondant au préfixe
     patterns = [
         str(REPERTOIRE_SORTIE / f"{prefix}*.mp4"),
         str(REPERTOIRE_SORTIE / f"{prefix}*.mp3"),
@@ -144,6 +158,7 @@ def lister_sorties(prefix: str):
     return files
 
 def hash_job(source_id: str, fps: int, intervalle):
+    # Crée un identifiant de job timelapse déterministe
     h = hashlib.sha1()
     h.update(source_id.encode("utf-8"))
     h.update(str(fps).encode("utf-8"))
@@ -151,10 +166,11 @@ def hash_job(source_id: str, fps: int, intervalle):
         h.update(f"{intervalle[0]}-{intervalle[1]}".encode("utf-8"))
     return h.hexdigest()[:16]
 
-# -------- Téléchargement / préparation vidéo --------
+# ---------------- Téléchargement / préparation vidéo ----------------
 
 def telecharger_preparer_video(url: str, cookies_path: Path | None, verbose: bool, qualite: str,
                                utiliser_intervalle: bool, debut: int, fin: int):
+    # Télécharge une vidéo via yt-dlp puis normalise en MP4 (HD ou compressée)
     st.write("Téléchargement / préparation de la vidéo en cours...")
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
     http_headers = {'User-Agent': user_agent, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.youtube.com/'}
@@ -280,7 +296,10 @@ def telecharger_preparer_video(url: str, cookies_path: Path | None, verbose: boo
 
     return str(cible), base_court, info, None
 
+# ---------------- Traitement local ----------------
+
 def traiter_local(src_local: Path, base_court: str, qualite: str, utiliser_intervalle: bool, debut: int, fin: int) -> str:
+    # Prépare la vidéo de base depuis un fichier local (HD ou compressée)
     try:
         ffmpeg = tl.chemin_ffmpeg()
     except Exception as e:
@@ -313,9 +332,10 @@ def traiter_local(src_local: Path, base_court: str, qualite: str, utiliser_inter
             _run_ffmpeg(args)
     return str(cible)
 
-# -------- Extraction des ressources --------
+# ---------------- Extraction des ressources ----------------
 
 def extraire_ressources(video_path: str, debut: int, fin: int, base_court: str, options: dict, utiliser_intervalle: bool):
+    # Génère MP4/MP3/WAV/Images (1fps et/ou 25fps) avec nommage temporel
     try:
         ffmpeg = tl.chemin_ffmpeg()
     except Exception as e:
@@ -417,7 +437,7 @@ with st.expander("Diagnostic système"):
     except Exception:
         pass
 
-# Etats
+# Etats init
 st.session_state.setdefault("debut_secs", 0)
 st.session_state.setdefault("fin_secs", 10)
 st.session_state.setdefault("video_base", None)
@@ -432,29 +452,33 @@ url = st.text_input("URL YouTube")
 cookies_path_eff = ck.afficher_section_cookies(REPERTOIRE_SORTIE)
 fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
 
-# Options
+# Options globales
 mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
 qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
 
+# Ressources à produire
 st.subheader("Ressources à produire")
 st.markdown("<style>div[data-testid='stHorizontalBlock'] label { white-space: nowrap; }</style>", unsafe_allow_html=True)
-c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
-with c1: opt_mp4 = st.checkbox("MP4", key="opt_mp4")
-with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3")
-with c3: opt_wav = st.checkbox("WAV", key="opt_wav")
-with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
-with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
-with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-# Exclusivité logique (pas de modification forcée de l’état UI)
+# Timelapse d’abord (pour pouvoir désactiver les autres options en conséquence)
+opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
+
+# Message d’exclusivité clair
 if opt_timelapse:
-    st.info("Mode timelapse activé : aucune prévisualisation, l’application génère uniquement le fichier timelapse à télécharger.")
+    st.warning("Timelapse sélectionné : seul le **timelapse** sera exporté. Les autres options sont désactivées.")
     fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
-    eff_opt = {"timelapse": True, "mp4": False, "mp3": False, "wav": False, "img1": False, "img25": False}
 else:
     fps_timelapse = 12
-    eff_opt = {"timelapse": False, "mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
 
+# Cases des autres ressources, désactivées si timelapse
+c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
+with c1: opt_mp4 = st.checkbox("MP4", key="opt_mp4", disabled=opt_timelapse)
+with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3", disabled=opt_timelapse)
+with c3: opt_wav = st.checkbox("WAV", key="opt_wav", disabled=opt_timelapse)
+with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1", disabled=opt_timelapse)
+with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25", disabled=opt_timelapse)
+
+# Étendue
 st.subheader("Étendue")
 etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
 if etendue == "Intervalle personnalisé":
@@ -468,9 +492,9 @@ if etendue == "Intervalle personnalisé":
 else:
     utiliser_intervalle = False
 
-# Aperçu vidéo uniquement si pas de timelapse
-afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=eff_opt["timelapse"])
-if afficher_apercu and not eff_opt["timelapse"]:
+# Aperçu vidéo (désactivé si timelapse)
+afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=opt_timelapse)
+if afficher_apercu and not opt_timelapse:
     if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
         size = taille_fichier(Path(st.session_state['video_base'])) or 0
         if size <= SEUIL_APERCU_OCTETS:
@@ -498,13 +522,14 @@ if afficher_apercu and not eff_opt["timelapse"]:
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# ---- Bouton unique ----
+# ---------------- Bouton d’exécution ----------------
+
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
-            # Préparation vidéo de base (depuis URL ou local)
+            # Préparation vidéo de base (URL ou fichier local)
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path_eff, mode_verbose, qualite, utiliser_intervalle,
@@ -530,12 +555,13 @@ if st.button("Lancer le traitement"):
             else:
                 st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-            # Production
+            # Production des sorties
             if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
                 base_court = st.session_state['base_court']
                 video_path = st.session_state['video_base']
 
-                if eff_opt["timelapse"]:
+                if opt_timelapse:
+                    # Exclusivité timelapse : on ne génère que le timelapse
                     try:
                         intervalle = (st.session_state["debut_secs"], st.session_state["fin_secs"]) if utiliser_intervalle else None
                         job_id = hash_job(f"file:{video_path}", st.session_state.get("fps_timelapse", 12), intervalle)
@@ -543,14 +569,19 @@ if st.button("Lancer le traitement"):
                             video_path, job_id, base_court, st.session_state.get("fps_timelapse", 12),
                             debut=st.session_state["debut_secs"] if utiliser_intervalle else None,
                             fin=st.session_state["fin_secs"] if utiliser_intervalle else None
-                            # aucun avec_flow ; et si présent, timelapse.py l'ignore via **kwargs
                         )
                         st.success(f"Timelapse généré ({nb_images} images).")
                         with open(out_path, "rb") as fh:
                             st.download_button("Télécharger le timelapse (.mp4)", data=fh, file_name=Path(out_path).name, mime="video/mp4")
+                        # Zip ne contient que le timelapse en mode exclusif
+                        zip_path = REPERTOIRE_SORTIE / f"resultats_{base_court}_timelapse.zip"
+                        zipper_sur_disque([out_path], zip_path)
+                        with open(zip_path, "rb") as fhz:
+                            st.download_button("Télécharger les résultats (.zip)", data=fhz, file_name=zip_path.name, mime="application/zip")
                     except Exception as e:
                         st.error(f"Echec du timelapse : {e}")
                 else:
+                    # Génération des ressources cochées
                     if utiliser_intervalle:
                         debut_eff = st.session_state["debut_secs"]
                         fin_eff = st.session_state["fin_secs"]
@@ -559,11 +590,11 @@ if st.button("Lancer le traitement"):
                         debut_eff, fin_eff = 0, duree
 
                     options = {
-                        "mp4": eff_opt["mp4"],
-                        "mp3": eff_opt["mp3"],
-                        "wav": eff_opt["wav"],
-                        "img1": eff_opt["img1"],
-                        "img25": eff_opt["img25"]
+                        "mp4": opt_mp4,
+                        "mp3": opt_mp3,
+                        "wav": opt_wav,
+                        "img1": opt_img1,
+                        "img25": opt_img25
                     }
                     if any(options.values()):
                         err2 = extraire_ressources(video_path, debut_eff, fin_eff, base_court, options, utiliser_intervalle)
@@ -572,6 +603,7 @@ if st.button("Lancer le traitement"):
                         else:
                             st.success("Ressources générées.")
 
+                    # Préparation du zip avec toutes les ressources produites + vidéo de base
                     fichiers = lister_sorties(base_court)
                     if Path(video_path) not in fichiers:
                         fichiers.append(Path(video_path))
