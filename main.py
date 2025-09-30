@@ -1,6 +1,6 @@
 # main.py
-# Application complète, intégrant cookies_persist.py (gestion cookies à part),
-# toutes les fonctionnalités précédentes : un seul bouton, intervalle optionnel,
+# Application complète, intégrant cookies.py (gestion cookies à part),
+# toutes les fonctionnalités : un seul bouton, intervalle optionnel,
 # Mode diagnostic yt-dl, choix Compressée/HD, timelapse export seul avec reprise,
 # extraction MP4/MP3/WAV/images avec numérotation i_{sec}s_{fps}fps_{frame}.jpg,
 # zip sur disque, aperçu vidéo sans doublon.
@@ -23,7 +23,7 @@ import cv2
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# Import du module timelapse (inchangé)
+# Import timelapse
 def _import_timelapse():
     try:
         import timelapse as tl
@@ -36,13 +36,13 @@ def _import_timelapse():
 
 tl = _import_timelapse()
 
-# Import du module cookies (nouveau fichier)
+# Import cookies (nom du fichier demandé : cookies.py)
 def _import_cookies():
     try:
-        import cookies_persist as ck
+        import cookies as ck
         return ck
     except Exception:
-        spec = importlib.util.spec_from_file_location("cookies_persist", str(Path("cookies_persist.py").resolve()))
+        spec = importlib.util.spec_from_file_location("cookies", str(Path("cookies.py").resolve()))
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)  # type: ignore
         return m
@@ -511,11 +511,9 @@ if afficher_apercu and not opt_timelapse:
 # Bouton unique
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
-        # Vérif ffmpeg
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
-            # Préparation de la vidéo de base
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path_eff, mode_verbose, qualite, utiliser_intervalle,
@@ -541,7 +539,6 @@ if st.button("Lancer le traitement"):
             else:
                 st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-            # Production
             if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
                 base_court = st.session_state['base_court']
                 video_path = st.session_state['video_base']
