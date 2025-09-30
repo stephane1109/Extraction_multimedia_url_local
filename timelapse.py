@@ -1,10 +1,10 @@
-
 # timelapse.py
-# Module timelapse SANS optical flow, robustifié :
-# - debut/fin deviennent optionnels (par défaut: None)
-# - reprise d’extraction par lots
+# Timelapse SANS optical flow, API tolérante :
+# - debut/fin optionnels
+# - **kwargs accepté (ignore tout argument inconnu comme avec_flow)
+# - reprise d’extraction
 # - ré-encodage H.264 + faststart si ffmpeg dispo
-# - cache sous /tmp/appdata (pas de reload Streamlit)
+# - cache sous /tmp/appdata
 
 import os
 import cv2
@@ -94,17 +94,18 @@ def _ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int])
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     nb = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     if debut is None: debut = 0
-    if fin is None or fin <= 0: fin = int(round(nb / fps))
+    if fin is None or fin <= 0: fin = int(round(nb / fps)) if fps > 0 else 1
     if fin <= debut: fin = debut + 1
     frame_start = int(round(debut * fps))
-    frame_end = min(nb, int(round(fin * fps)))
+    frame_end = min(nb, int(round(fin * fps))) if fps > 0 else nb
     frame_start = max(0, frame_start)
     frame_end = max(frame_start + 1, frame_end)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
     return cap, float(fps), frame_start, frame_end
 
 def _extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
-                                  debut: Optional[int], fin: Optional[int], batch_frames: int = 1200) -> Tuple[int, int]:
+                                  debut: Optional[int], fin: Optional[int],
+                                  batch_frames: int = 1200) -> Tuple[int, int]:
     images_dir = job_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
@@ -150,7 +151,7 @@ def _extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
             "ratio_saut": ratio_saut,
             "images_sauvegardees": total
         })
-        time.sleep(0.02)
+        time.sleep(0.01)
 
     cap.release()
     return int(round(fps)), total
@@ -196,13 +197,14 @@ def _construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: st
         return str(out_brut)
 
 def executer_timelapse(src_path: str, job_id: str, base_nom: str, fps: int,
-                       debut: Optional[int] = None, fin: Optional[int] = None) -> Tuple[str, int]:
+                       debut: Optional[int] = None, fin: Optional[int] = None,
+                       **kwargs) -> Tuple[str, int]:
     """
     Exécute le pipeline timelapse avec reprise. Renvoie (chemin_fichier_final, nb_images).
-    debut et fin sont optionnels ; si None => toute la vidéo.
+    debut/fin optionnels. **kwargs ignoré (compatibilité : accepte avec_flow sans l’utiliser).
     """
     job_dir = TIMELAPSE_DIR / f"job_{job_id}"
     (job_dir / "images").mkdir(parents=True, exist_ok=True)
-    fps_src, nb = _extraire_images_avec_reprise(src_path, job_dir, fps, debut, fin)
+    _, nb = _extraire_images_avec_reprise(src_path, job_dir, fps, debut, fin)
     out = _construire_video_depuis_images(job_dir, fps, base_nom)
     return out, nb
