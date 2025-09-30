@@ -3,11 +3,47 @@
 import os
 import cv2
 import subprocess
+import shutil
 
-# ---------------- Chemins ffmpeg/ffprobe fixes ----------------
-# Ces chemins sont valides sur Streamlit Cloud quand packages.txt contient "ffmpeg".
-FFMPEG = os.environ.get("FFMPEG_BINARY", "/usr/bin/ffmpeg")
-FFPROBE = os.environ.get("FFPROBE_BINARY", "/usr/bin/ffprobe")
+# ---------------- Résolution robuste des binaires ----------------
+
+def _resoudre_binaire(nom_env, nom, chemins_standards=("/usr/bin", "/usr/local/bin", "/bin")):
+    """
+    Résout le chemin d’un binaire (ffmpeg/ffprobe) :
+    1) variable d’environnement (nom_env)
+    2) shutil.which(nom)
+    3) chemins standards fournis
+    Renvoie le chemin trouvé ou None.
+    """
+    cand_env = os.environ.get(nom_env)
+    if cand_env and os.path.exists(cand_env):
+        return cand_env
+    cand = shutil.which(nom)
+    if cand:
+        return cand
+    for dossier in chemins_standards:
+        p = os.path.join(dossier, nom)
+        if os.path.exists(p):
+            return p
+    return None
+
+def chemin_ffmpeg():
+    """
+    Renvoie le chemin de ffmpeg, ou lève RuntimeError s’il est introuvable.
+    """
+    p = _resoudre_binaire("FFMPEG_BINARY", "ffmpeg")
+    if not p:
+        raise RuntimeError("ffmpeg introuvable. Installe-le (packages.txt) ou renseigne $FFMPEG_BINARY.")
+    return p
+
+def chemin_ffprobe():
+    """
+    Renvoie le chemin de ffprobe, ou lève RuntimeError s’il est introuvable.
+    """
+    p = _resoudre_binaire("FFPROBE_BINARY", "ffprobe")
+    if not p:
+        raise RuntimeError("ffprobe introuvable. Installe-le (packages.txt) ou renseigne $FFPROBE_BINARY.")
+    return p
 
 # ---------------- Timelapse ----------------
 
@@ -29,7 +65,6 @@ def appliquer_optical_flow(images):
         for y in range(0, h, step):
             for x in range(0, w, step):
                 fx, fy = flow[y, x]
-                # flèches de mouvement
                 cv2.arrowedLine(
                     vis, (x, y), (int(x + fx), int(y + fy)),
                     (0, 255, 0), 1, tipLength=0.4
@@ -78,20 +113,19 @@ def creer_video_depuis_images(dossier_images, chemin_sortie, fps=12):
     fichiers = sorted([f for f in os.listdir(dossier_images) if f.endswith(".jpg")])
     if not fichiers:
         return None
-    import cv2 as _cv2
-    image_exemple = _cv2.imread(os.path.join(dossier_images, fichiers[0]))
+    image_exemple = cv2.imread(os.path.join(dossier_images, fichiers[0]))
     if image_exemple is None:
         return None
     h, w, _ = image_exemple.shape
 
-    codec = _cv2.VideoWriter_fourcc(*'mp4v')
-    video = _cv2.VideoWriter(chemin_sortie, codec, fps, (w, h))
+    codec = cv2.VideoWriter_fourcc(*'mp4v')
+    video = cv2.VideoWriter(chemin_sortie, codec, fps, (w, h))
     for f in fichiers:
-        img = _cv2.imread(os.path.join(dossier_images, f))
+        img = cv2.imread(os.path.join(dossier_images, f))
         if img is None:
             continue
         if img.shape[0] != h or img.shape[1] != w:
-            img = _cv2.resize(img, (w, h))
+            img = cv2.resize(img, (w, h))
         video.write(img)
     video.release()
     return chemin_sortie
@@ -100,8 +134,9 @@ def reencoder_video_h264(chemin_entree, chemin_sortie):
     """
     Réencode une vidéo en H.264 pour compatibilité maximale (lecteur web).
     """
+    ffmpeg = chemin_ffmpeg()
     commande = [
-        FFMPEG, "-y",
+        ffmpeg, "-y",
         "-i", chemin_entree,
         "-vcodec", "libx264",
         "-preset", "fast",
