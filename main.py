@@ -17,26 +17,22 @@ import pathlib
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# ---------------- Chemins ffmpeg/ffprobe fixes ----------------
-FFMPEG = os.environ.get("FFMPEG_BINARY", "/usr/bin/ffmpeg")
-FFPROBE = os.environ.get("FFPROBE_BINARY", "/usr/bin/ffprobe")
-
 # ---------------- Import résilient de timelapse.py ----------------
 def _import_timelapse_resilient():
     here = pathlib.Path(__file__).parent
     try:
-        from timelapse import generer_timelapse
-        return generer_timelapse
+        from timelapse import generer_timelapse, chemin_ffmpeg, chemin_ffprobe
+        return generer_timelapse, chemin_ffmpeg, chemin_ffprobe
     except Exception:
         mod_path = here / "timelapse.py"
         if mod_path.exists():
             spec = importlib.util.spec_from_file_location("timelapse_dynamic", str(mod_path))
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            return mod.generer_timelapse
+            return mod.generer_timelapse, mod.chemin_ffmpeg, mod.chemin_ffprobe
         raise
 
-generer_timelapse = _import_timelapse_resilient()
+generer_timelapse, chemin_ffmpeg, chemin_ffprobe = _import_timelapse_resilient()
 
 # ---------------- Constantes ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
@@ -49,6 +45,14 @@ REPERTOIRE_TEMP = os.path.abspath("tmp")
 
 def vider_cache():
     st.cache_data.clear()
+
+def ffmpeg_disponible():
+    try:
+        _ = chemin_ffmpeg()
+        _ = chemin_ffprobe()
+        return True
+    except Exception:
+        return False
 
 def nettoyer_titre(titre):
     if not titre:
@@ -107,8 +111,9 @@ def zipper_fichiers(fichiers, nom_zip_sans_ext):
 
 def duree_video_seconds(video_path):
     try:
+        ffprobe = chemin_ffprobe()
         res = subprocess.run(
-            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", video_path],
             capture_output=True, text=True, check=True
         )
@@ -223,6 +228,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
 
     # Préparer la vidéo de travail
     cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
+    ffmpeg = chemin_ffmpeg()
 
     def _run_ffmpeg(args):
         subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -230,7 +236,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
     if qualite == "Compressée (1280p, CRF 28)":
         try:
             _run_ffmpeg([
-                FFMPEG, "-y", "-i", chemin_source_propre,
+                ffmpeg, "-y", "-i", chemin_source_propre,
                 "-vf", "scale=1280:-2",
                 "-c:v", "libx264", "-preset", "slow", "-crf", "28",
                 "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible
@@ -239,11 +245,11 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
             return None, None, None, f"Echec de la compression : {e}"
     else:
         try:
-            _run_ffmpeg([FFMPEG, "-y", "-i", chemin_source_propre, "-c", "copy", "-movflags", "+faststart", cible])
+            _run_ffmpeg([ffmpeg, "-y", "-i", chemin_source_propre, "-c", "copy", "-movflags", "+faststart", cible])
         except Exception:
             try:
                 _run_ffmpeg([
-                    FFMPEG, "-y", "-i", chemin_source_propre,
+                    ffmpeg, "-y", "-i", chemin_source_propre,
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cible
                 ])
@@ -262,31 +268,33 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
 
 def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_intervalle):
     try:
+        ffmpeg = chemin_ffmpeg()
+
         def _run_ffmpeg(args):
             subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         def cmd_segment(sortie):
             if utiliser_intervalle:
-                return [FFMPEG, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
+                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
                         "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
                         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", sortie]
             else:
-                return [FFMPEG, "-y", "-i", video_path,
+                return [ffmpeg, "-y", "-i", video_path,
                         "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
                         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", sortie]
 
         def cmd_audio(sortie, codec_args):
             if utiliser_intervalle:
-                return [FFMPEG, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
+                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
             else:
-                return [FFMPEG, "-y", "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
+                return [ffmpeg, "-y", "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
 
         def cmd_images(output_pattern, fps):
             vf = f"fps={fps},scale=1920:1080"
             if utiliser_intervalle:
-                return [FFMPEG, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
             else:
-                return [FFMPEG, "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+                return [ffmpeg, "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
 
         if options.get("mp4"):
             nom = f"{base_court}_seg.mp4" if utiliser_intervalle else f"{base_court}_full.mp4"
@@ -333,7 +341,7 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
     except Exception as e:
         return str(e)
 
-# ---------------- Interface utilisateur (sans st.form, UI réactive) ----------------
+# ---------------- Interface utilisateur ----------------
 
 st.title("Extraction multimédia (vidéo, audio, images)")
 st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
@@ -348,6 +356,12 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
+# Panneau de diagnostic (optionnel)
+with st.expander("Diagnostic système"):
+    st.write("ffmpeg :", chemin_ffmpeg() if ffmpeg_disponible() else "introuvable")
+    st.write("ffprobe :", (chemin_ffprobe() if ffmpeg_disponible() else "introuvable"))
+
+# Etats initiaux
 st.session_state.setdefault("debut_secs", 0)
 st.session_state.setdefault("fin_secs", 10)
 st.session_state.setdefault("local_temp_path", None)
@@ -357,6 +371,7 @@ st.session_state.setdefault("base_court", None)
 st.session_state.setdefault("apercu_local_bytes", None)
 st.session_state.setdefault("upload_signature", None)
 
+# Source
 url = st.text_input("URL YouTube")
 cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
 fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
@@ -364,6 +379,7 @@ fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["
 mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
 qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
 
+# Ressources à produire
 st.subheader("Ressources à produire")
 st.markdown("<style>div[data-testid='stHorizontalBlock'] label { white-space: nowrap; }</style>", unsafe_allow_html=True)
 c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
@@ -374,6 +390,7 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
+# Timelapse options
 if opt_timelapse:
     col_t1, col_t2 = st.columns([1,1])
     with col_t1:
@@ -384,6 +401,7 @@ else:
     fps_timelapse = 12
     opt_flow = False
 
+# Étendue
 st.subheader("Étendue")
 etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
 if etendue == "Intervalle personnalisé":
@@ -397,8 +415,10 @@ if etendue == "Intervalle personnalisé":
 else:
     utiliser_intervalle = False
 
+# Aperçu
 afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
 
+# Stabilisation upload local
 if fichier_local is not None:
     signature = f"{fichier_local.name}-{fichier_local.size}"
     if signature != st.session_state['upload_signature']:
@@ -414,6 +434,7 @@ if fichier_local is not None:
             except Exception:
                 st.session_state['apercu_local_bytes'] = b""
 
+# Affichage aperçu sans doublon
 if afficher_apercu:
     if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
         size = taille_fichier(st.session_state['video_base']) or 0
@@ -428,103 +449,113 @@ if afficher_apercu:
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
+# Bouton unique
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
+        # Cookies
         cookies_path = None
         if cookies_file is not None:
             cookies_path = os.path.join(REPERTOIRE_SORTIE, "cookies.txt")
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        if url:
-            video_base, base_court, info, err = telecharger_preparer_video(
-                url, cookies_path, mode_verbose, qualite, utiliser_intervalle, st.session_state["debut_secs"], st.session_state["fin_secs"]
-            )
-            if err:
-                st.error(f"Erreur : {err}")
-            else:
-                st.session_state['video_base'] = video_base
-                st.session_state['base_court'] = base_court
-                st.success(f"Vidéo prête : {os.path.basename(video_base)}")
-        elif st.session_state.get('local_temp_path'):
-            base_court = st.session_state.get('local_name_base') or generer_nom_base("local", "video")
-            src_local = st.session_state['local_temp_path']
-            cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
-
-            def _run_ffmpeg(args):
-                subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-
-            try:
-                if qualite == "Compressée (1280p, CRF 28)":
-                    if utiliser_intervalle:
-                        _run_ffmpeg([
-                            FFMPEG, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"]), "-i", src_local,
-                            "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible
-                        ])
-                    else:
-                        _run_ffmpeg([
-                            FFMPEG, "-y", "-i", src_local,
-                            "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible
-                        ])
+        # Vérif binaire
+        if not ffmpeg_disponible():
+            st.error("ffmpeg/ffprobe introuvables. Ajoute 'ffmpeg' dans packages.txt ou renseigne $FFMPEG_BINARY et $FFPROBE_BINARY.")
+        else:
+            # Préparer vidéo (URL ou local)
+            if url:
+                video_base, base_court, info, err = telecharger_preparer_video(
+                    url, cookies_path, mode_verbose, qualite, utiliser_intervalle, st.session_state["debut_secs"], st.session_state["fin_secs"]
+                )
+                if err:
+                    st.error(f"Erreur : {err}")
                 else:
-                    if utiliser_intervalle:
-                        _run_ffmpeg([
-                            FFMPEG, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"]), "-i", src_local,
-                            "-c", "copy", "-movflags", "+faststart", cible
-                        ])
-                    else:
-                        _run_ffmpeg([
-                            FFMPEG, "-y", "-i", src_local, "-c", "copy", "-movflags", "+faststart", cible
-                        ])
-            except Exception:
-                args = [FFMPEG, "-y", "-i", src_local,
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cible]
-                if utiliser_intervalle:
-                    args = [FFMPEG, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"])] + args[2:]
-                try:
+                    st.session_state['video_base'] = video_base
+                    st.session_state['base_court'] = base_court
+                    st.success(f"Vidéo prête : {os.path.basename(video_base)}")
+            elif st.session_state.get('local_temp_path'):
+                base_court = st.session_state.get('local_name_base') or generer_nom_base("local", "video")
+                src_local = st.session_state['local_temp_path']
+                cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
+                ffmpeg = chemin_ffmpeg()
+
+                def _run_ffmpeg(args):
                     subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                except Exception as e:
-                    st.error(f"Echec du traitement local : {e}")
+
+                try:
+                    if qualite == "Compressée (1280p, CRF 28)":
+                        if utiliser_intervalle:
+                            _run_ffmpeg([
+                                ffmpeg, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"]), "-i", src_local,
+                                "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible
+                            ])
+                        else:
+                            _run_ffmpeg([
+                                ffmpeg, "-y", "-i", src_local,
+                                "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible
+                            ])
+                    else:
+                        if utiliser_intervalle:
+                            _run_ffmpeg([
+                                ffmpeg, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"]), "-i", src_local,
+                                "-c", "copy", "-movflags", "+faststart", cible
+                            ])
+                        else:
+                            _run_ffmpeg([
+                                ffmpeg, "-y", "-i", src_local, "-c", "copy", "-movflags", "+faststart", cible
+                            ])
+                except Exception:
+                    args = [ffmpeg, "-y", "-i", src_local,
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cible]
+                    if utiliser_intervalle:
+                        args = [ffmpeg, "-y", "-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"])] + args[2:]
+                    try:
+                        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    except Exception as e:
+                        st.error(f"Echec du traitement local : {e}")
+                    else:
+                        st.session_state['video_base'] = cible
+                        st.session_state['base_court'] = base_court
+                        st.success(f"Vidéo prête : {os.path.basename(cible)}")
                 else:
                     st.session_state['video_base'] = cible
                     st.session_state['base_court'] = base_court
                     st.success(f"Vidéo prête : {os.path.basename(cible)}")
             else:
-                st.session_state['video_base'] = cible
-                st.session_state['base_court'] = base_court
-                st.success(f"Vidéo prête : {os.path.basename(cible)}")
-        else:
-            st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
+                st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-        if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-            if utiliser_intervalle:
-                debut_eff = st.session_state["debut_secs"]
-                fin_eff = st.session_state["fin_secs"]
-            else:
-                duree = duree_video_seconds(st.session_state['video_base']) or 0
-                debut_eff, fin_eff = 0, duree
-
-            options = {"mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
-            if any(options.values()):
-                err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, st.session_state['base_court'], options, utiliser_intervalle)
-                if err2:
-                    st.error(f"Erreur pendant l'extraction : {err2}")
+            # Extraction + Timelapse
+            if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
+                if utiliser_intervalle:
+                    debut_eff = st.session_state["debut_secs"]
+                    fin_eff = st.session_state["fin_secs"]
                 else:
-                    st.success("Ressources générées.")
+                    duree = duree_video_seconds(st.session_state['video_base']) or 0
+                    debut_eff, fin_eff = 0, duree
 
-            if opt_timelapse:
-                try:
-                    sortie_timelapse = generer_timelapse(
-                        st.session_state['video_base'], REPERTOIRE_SORTIE, st.session_state['base_court'],
-                        fps_cible=fps_timelapse, avec_flow=opt_flow
-                    )
-                    st.success(f"Timelapse généré : {os.path.basename(sortie_timelapse)}")
-                except Exception as e:
-                    st.error(f"Echec du timelapse : {e}")
+                options = {"mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
+                if any(options.values()):
+                    err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, st.session_state['base_court'], options, utiliser_intervalle)
+                    if err2:
+                        st.error(f"Erreur pendant l'extraction : {err2}")
+                    else:
+                        st.success("Ressources générées.")
 
+                if opt_timelapse:
+                    try:
+                        sortie_timelapse = generer_timelapse(
+                            st.session_state['video_base'], REPERTOIRE_SORTIE, st.session_state['base_court'],
+                            fps_cible=fps_timelapse, avec_flow=opt_flow
+                        )
+                        st.success(f"Timelapse généré : {os.path.basename(sortie_timelapse)}")
+                    except Exception as e:
+                        st.error(f"Echec du timelapse : {e}")
+
+# Téléchargement final unique
 if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
     st.markdown("---")
     if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
