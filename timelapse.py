@@ -1,5 +1,5 @@
 # timelapse.py
-# Module timelapse : extraction robuste avec reprise, construction vidéo finale
+# Module timelapse SANS optical flow : extraction robuste avec reprise, construction vidéo finale.
 # Toutes les écritures se font sous /tmp/appdata pour éviter tout trigger de reload.
 
 import os
@@ -47,10 +47,11 @@ def _resoudre_binaire(nom_env: str, nom: str) -> Optional[str]:
     3) imageio-ffmpeg
     4) cache statique sous /tmp/appdata/ffmpeg-bin, sinon téléchargement
     """
+    import shutil as _sh
     cand = os.environ.get(nom_env)
     if cand and Path(cand).exists():
         return cand
-    which = shutil.which(nom)
+    which = _sh.which(nom)
     if which:
         return which
     try:
@@ -96,27 +97,6 @@ def sauver_progress(job_dir: Path, d: dict) -> None:
     p = progres_path(job_dir)
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def appliquer_optical_flow(images: List) -> List:
-    """
-    Ajoute un overlay du flux optique entre images successives (visualisation vecteurs).
-    """
-    out = []
-    for i in range(len(images) - 1):
-        img1 = cv2.cvtColor(images[i], cv2.COLOR_BGR2GRAY)
-        img2 = cv2.cvtColor(images[i+1], cv2.COLOR_BGR2GRAY)
-        flow = cv2.calcOpticalFlowFarneback(img1, img2, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-        vis = images[i].copy()
-        h, w = img1.shape
-        step = 16
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                fx, fy = flow[y, x]
-                cv2.arrowedLine(vis, (x, y), (int(x + fx), int(y + fy)), (0, 255, 0), 1, tipLength=0.4)
-        out.append(vis)
-    if images:
-        out.append(images[-1])
-    return out
-
 def ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) -> Tuple[cv2.VideoCapture, float, int, int]:
     """
     Ouvre la vidéo avec OpenCV et renvoie (cap, fps, frame_start, frame_end).
@@ -136,7 +116,7 @@ def ouvrir_capture(chemin_video: str, debut: Optional[int], fin: Optional[int]) 
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
     return cap, float(fps), frame_start, frame_end
 
-def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int, avec_flow: bool,
+def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int,
                                  debut: Optional[int], fin: Optional[int], batch_frames: int = 1200) -> Tuple[int, int]:
     """
     Parcourt la vidéo par lots, échantillonne à fps_cible et sauve dans job_dir/images en reprenant si besoin.
@@ -163,7 +143,7 @@ def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int, a
     total = next_index
     while frame_pos < frame_end:
         courant = 0
-        lot = []
+        lot: List = []
         while courant < batch_frames and frame_pos < frame_end:
             ok, img = cap.read()
             if not ok:
@@ -176,9 +156,6 @@ def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int, a
         if not lot:
             continue
 
-        if avec_flow and len(lot) > 1:
-            lot = appliquer_optical_flow(lot)
-
         for img in lot:
             cv2.imwrite(str(images_dir / f"frame_{total:06d}.jpg"), img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
             total += 1
@@ -190,7 +167,7 @@ def extraire_images_avec_reprise(src_path: str, job_dir: Path, fps_cible: int, a
             "ratio_saut": ratio_saut,
             "images_sauvegardees": total
         })
-        time.sleep(0.03)
+        time.sleep(0.02)
 
     cap.release()
     return int(round(fps)), total
@@ -239,13 +216,13 @@ def construire_video_depuis_images(job_dir: Path, fps_sortie: int, base_nom: str
     else:
         return str(out_brut)
 
-def executer_timelapse(src_path: str, job_id: str, base_nom: str, fps: int, avec_flow: bool,
+def executer_timelapse(src_path: str, job_id: str, base_nom: str, fps: int,
                        debut: Optional[int], fin: Optional[int]) -> Tuple[str, int]:
     """
     Exécute le pipeline timelapse avec reprise. Renvoie (chemin_fichier_final, nb_images).
     """
     job_dir = TIMELAPSE_DIR / f"job_{job_id}"
     (job_dir / "images").mkdir(parents=True, exist_ok=True)
-    fps_src, nb = extraire_images_avec_reprise(src_path, job_dir, fps, avec_flow, debut, fin)
+    fps_src, nb = extraire_images_avec_reprise(src_path, job_dir, fps, debut, fin)
     out = construire_video_depuis_images(job_dir, fps, base_nom)
     return out, nb
