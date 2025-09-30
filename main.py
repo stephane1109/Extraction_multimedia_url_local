@@ -101,14 +101,16 @@ def lister_fichiers(patterns):
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
-def zipper_fichiers(fichiers, nom_zip_sans_ext):
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+def zipper_fichiers_sur_disque(fichiers, chemin_zip):
+    """
+    Crée un zip sur le disque (pas en mémoire) pour limiter l’usage RAM.
+    Renvoie le chemin du zip.
+    """
+    with zipfile.ZipFile(chemin_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for abs_path in fichiers:
             if os.path.isfile(abs_path):
                 zf.write(abs_path, arcname=os.path.basename(abs_path))
-    buffer.seek(0)
-    return buffer, f"{nom_zip_sans_ext}.zip"
+    return chemin_zip
 
 def duree_video_seconds(video_path):
     """
@@ -309,7 +311,6 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
                     os.makedirs(rep, exist_ok=True)
                     tmp_pattern = os.path.join(rep, "tmp_%06d.jpg")
                     _run_ffmpeg(cmd_images(tmp_pattern, fps))
-
                     images_gen = sorted(glob.glob(os.path.join(rep, "tmp_*.jpg")))
                     start_offset = debut if utiliser_intervalle else 0
                     for i, src in enumerate(images_gen):
@@ -335,7 +336,6 @@ def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_in
 
 # ---------------- Interface utilisateur ----------------
 
-# Token d’amorçage pour détecter un redémarrage
 if "boot_id" not in st.session_state:
     st.session_state["boot_id"] = str(uuid.uuid4())
 BOOT_ID = st.session_state["boot_id"]
@@ -390,7 +390,16 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
+# Si Timelapse sélectionné, on bascule en mode "export seul timelapse"
 if opt_timelapse:
+    st.info("Mode timelapse activé : l’application n’affichera aucune vidéo, elle générera uniquement le fichier timelapse à télécharger.")
+    # Neutraliser toutes les autres sorties pour éviter du travail inutile
+    opt_mp4 = False
+    opt_mp3 = False
+    opt_wav = False
+    opt_img1 = False
+    opt_img25 = False
+
     col_t1, col_t2 = st.columns([1,1])
     with col_t1:
         fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
@@ -413,8 +422,23 @@ if etendue == "Intervalle personnalisé":
 else:
     utiliser_intervalle = False
 
-afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True)
+# Aperçu vidéo uniquement si timelapse n’est PAS sélectionné
+afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=opt_timelapse)
+if afficher_apercu and not opt_timelapse:
+    if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
+        size = taille_fichier(st.session_state['video_base']) or 0
+        if size <= SEUIL_APERCU_OCTETS:
+            with open(st.session_state['video_base'], "rb") as f:
+                st.video(f.read(), format="video/mp4")
+    elif fichier_local is not None and st.session_state.get('apercu_local_bytes'):
+        if st.session_state['apercu_local_bytes']:
+            st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
+        else:
+            st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
+    elif url:
+        st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
+# Stabilisation upload local
 if fichier_local is not None:
     signature = f"{fichier_local.name}-{fichier_local.size}"
     if signature != st.session_state['upload_signature']:
@@ -423,39 +447,27 @@ if fichier_local is not None:
             st.session_state['local_temp_path'] = temp_path
             st.session_state['local_name_base'] = base_local
             st.session_state['upload_signature'] = signature
-            try:
-                with open(temp_path, "rb") as f:
-                    data = f.read()
-                st.session_state['apercu_local_bytes'] = data if len(data) <= SEUIL_APERCU_OCTETS else b""
-            except Exception:
-                st.session_state['apercu_local_bytes'] = b""
+            if not opt_timelapse:  # pas d’aperçu en mode timelapse
+                try:
+                    with open(temp_path, "rb") as f:
+                        data = f.read()
+                    st.session_state['apercu_local_bytes'] = data if len(data) <= SEUIL_APERCU_OCTETS else b""
+                except Exception:
+                    st.session_state['apercu_local_bytes'] = b""
 
-if afficher_apercu:
-    if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-        size = taille_fichier(st.session_state['video_base']) or 0
-        if size <= SEUIL_APERCU_OCTETS:
-            with open(st.session_state['video_base'], "rb") as f:
-                st.video(f.read(), format="video/mp4")
-    elif st.session_state.get('apercu_local_bytes'):
-        if st.session_state['apercu_local_bytes']:
-            st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
-        else:
-            st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
-    elif url:
-        st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
-
+# Bouton unique
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
+        cookies_path = None
         if cookies_file is not None:
             cookies_path = os.path.join(REPERTOIRE_SORTIE, "cookies.txt")
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
-        else:
-            cookies_path = None
 
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
+            # Préparer vidéo de base
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path, mode_verbose, qualite, utiliser_intervalle,
@@ -463,6 +475,7 @@ if st.button("Lancer le traitement"):
                 )
                 if err:
                     st.error(f"Erreur : {err}")
+                    video_base = None
                 else:
                     st.session_state['video_base'] = video_base
                     st.session_state['base_court'] = base_court
@@ -498,58 +511,54 @@ if st.button("Lancer le traitement"):
                         subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                     except Exception as e:
                         st.error(f"Echec du traitement local : {e}")
-                    else:
+                        cible = None
+                finally:
+                    if cible:
                         st.session_state['video_base'] = cible
                         st.session_state['base_court'] = base_court
                         st.success(f"Vidéo prête : {os.path.basename(cible)}")
-                else:
-                    st.session_state['video_base'] = cible
-                    st.session_state['base_court'] = base_court
-                    st.success(f"Vidéo prête : {os.path.basename(cible)}")
             else:
                 st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
+            # Si on a une vidéo prête, lancer la production demandée
             if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-                if utiliser_intervalle:
-                    debut_eff = st.session_state["debut_secs"]
-                    fin_eff = st.session_state["fin_secs"]
-                else:
-                    duree = duree_video_seconds(st.session_state['video_base']) or 0
-                    debut_eff, fin_eff = 0, duree
+                base_court = st.session_state['base_court']
 
-                options = {"mp4": st.session_state.get("opt_mp4", False) if "opt_mp4" in st.session_state else False,
-                           "mp3": st.session_state.get("opt_mp3", False) if "opt_mp3" in st.session_state else False,
-                           "wav": st.session_state.get("opt_wav", False) if "opt_wav" in st.session_state else False,
-                           "img1": st.session_state.get("opt_img1", False) if "opt_img1" in st.session_state else False,
-                           "img25": st.session_state.get("opt_img25", False) if "opt_img25" in st.session_state else False}
-                if any(options.values()):
-                    err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, st.session_state['base_court'], options, utiliser_intervalle)
-                    if err2:
-                        st.error(f"Erreur pendant l'extraction : {err2}")
-                    else:
-                        st.success("Ressources générées.")
-
-                if st.session_state.get("opt_timelapse", False):
+                if opt_timelapse:
                     try:
                         sortie_timelapse = generer_timelapse(
-                            st.session_state['video_base'], REPERTOIRE_SORTIE, st.session_state['base_court'],
-                            fps_cible=st.session_state.get("fps_timelapse", 12), avec_flow=st.session_state.get("opt_flow", False)
+                            st.session_state['video_base'], REPERTOIRE_SORTIE, base_court,
+                            fps_cible=fps_timelapse, avec_flow=opt_flow
                         )
                         st.success(f"Timelapse généré : {os.path.basename(sortie_timelapse)}")
+                        # Préparer un zip minimal uniquement avec le timelapse
+                        zip_path = os.path.join(REPERTOIRE_SORTIE, f"resultats_timelapse_{base_court}.zip")
+                        zipper_fichiers_sur_disque([sortie_timelapse], zip_path)
+                        with open(zip_path, "rb") as fh:
+                            st.download_button("Télécharger le timelapse (.zip)", data=fh, file_name=os.path.basename(zip_path), mime="application/zip")
                     except Exception as e:
                         st.error(f"Echec du timelapse : {e}")
+                else:
+                    # Mode extraction classique
+                    if utiliser_intervalle:
+                        debut_eff = st.session_state["debut_secs"]
+                        fin_eff = st.session_state["fin_secs"]
+                    else:
+                        duree = duree_video_seconds(st.session_state['video_base']) or 0
+                        debut_eff, fin_eff = 0, duree
 
-if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-    st.markdown("---")
-    if st.checkbox("Afficher l’aperçu vidéo (après traitement)", value=True, key="apercu_post"):
-        size = taille_fichier(st.session_state['video_base']) or 0
-        if size <= SEUIL_APERCU_OCTETS:
-            with open(st.session_state['video_base'], "rb") as f:
-                st.video(f.read(), format="video/mp4")
-
-    prefix = st.session_state['base_court']
-    fichiers_run = collecter_sorties_run(prefix)
-    if st.session_state['video_base'] not in fichiers_run:
-        fichiers_run.append(st.session_state['video_base'])
-    buffer_zip, nom_zip = zipper_fichiers(fichiers_run, f"resultats_{prefix}")
-    st.download_button("Télécharger", data=buffer_zip, file_name=nom_zip, mime="application/zip")
+                    options = {"mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
+                    if any(options.values()):
+                        err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, base_court, options, utiliser_intervalle)
+                        if err2:
+                            st.error(f"Erreur pendant l'extraction : {err2}")
+                        else:
+                            st.success("Ressources générées.")
+                    # Zip complet
+                    fichiers_run = collecter_sorties_run(base_court)
+                    if st.session_state['video_base'] not in fichiers_run:
+                        fichiers_run.append(st.session_state['video_base'])
+                    zip_path = os.path.join(REPERTOIRE_SORTIE, f"resultats_{base_court}.zip")
+                    zipper_fichiers_sur_disque(fichiers_run, zip_path)
+                    with open(zip_path, "rb") as fh:
+                        st.download_button("Télécharger les résultats (.zip)", data=fh, file_name=os.path.basename(zip_path), mime="application/zip")
