@@ -4,38 +4,91 @@ import os
 import cv2
 import subprocess
 import shutil
+import sys
+import stat
+import tarfile
+import tempfile
+from pathlib import Path
 
-# Tentative de fallback vers un binaire portable via imageio-ffmpeg
-def _ffmpeg_via_imageio():
+# ---------------- Téléchargement binaire statique (fallback ultime) ----------------
+
+def _telecharger_ffmpeg_statique(dest_dir: Path) -> str:
+    """
+    Télécharge un build statique ffmpeg amd64 et renvoie le chemin de l'exécutable.
+    On utilise une archive .tar.xz (John Van Sickle). Nécessite accès réseau.
+    """
+    import urllib.request
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    archive = dest_dir / "ffmpeg-release-amd64-static.tar.xz"
     try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
+        urllib.request.urlretrieve(url, str(archive))
+    except Exception as e:
+        raise RuntimeError(f"Echec du téléchargement de ffmpeg statique : {e}")
+
+    try:
+        with tarfile.open(archive, "r:xz") as tf:
+            members = [m for m in tf.getmembers() if m.name.endswith("/ffmpeg")]
+            if not members:
+                raise RuntimeError("Archive ffmpeg invalide : binaire non trouvé.")
+            tf.extractall(path=dest_dir)
+        # Chercher le binaire extrait
+        for p in dest_dir.glob("ffmpeg-*-amd64-static/ffmpeg"):
+            p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            return str(p)
+    except Exception as e:
+        raise RuntimeError(f"Echec de l'extraction de ffmpeg : {e}")
+
+    raise RuntimeError("Binaire ffmpeg introuvable après extraction.")
+
+# ---------------- Résolution robuste des binaires ----------------
 
 def _resoudre_binaire(nom_env, nom, chemins_standards=("/usr/bin", "/usr/local/bin", "/bin")):
     """
     Résout le chemin d’un binaire (ffmpeg) :
     1) variable d’environnement (nom_env)
     2) shutil.which(nom)
-    3) chemins standards
-    4) imageio-ffmpeg (fallback portable)
-    Renvoie le chemin trouvé ou None.
+    3) chemins standards fournis
+    4) imageio-ffmpeg
+    5) téléchargement d’un binaire statique dans /tmp/ffmpeg-bin
+    Renvoie le chemin trouvé ou None (si tout échoue).
     """
+    # 1) Variable d'environnement
     cand_env = os.environ.get(nom_env)
     if cand_env and os.path.exists(cand_env):
         return cand_env
+
+    # 2) which
     cand = shutil.which(nom)
     if cand:
         return cand
-    for d in chemins_standards:
-        p = os.path.join(d, nom)
+
+    # 3) chemins standards
+    for dossier in chemins_standards:
+        p = os.path.join(dossier, nom)
         if os.path.exists(p):
             return p
-    img = _ffmpeg_via_imageio()
-    if img and os.path.exists(img):
-        return img
-    return None
+
+    # 4) imageio-ffmpeg
+    try:
+        import imageio_ffmpeg
+        p = imageio_ffmpeg.get_ffmpeg_exe()
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+
+    # 5) téléchargement statique (cache dans /tmp/ffmpeg-bin)
+    try:
+        cache_dir = Path("/tmp/ffmpeg-bin")
+        # si déjà téléchargé
+        for p in cache_dir.glob("ffmpeg-*-amd64-static/ffmpeg"):
+            if p.exists():
+                return str(p)
+        return _telecharger_ffmpeg_statique(cache_dir)
+    except Exception:
+        return None
 
 def chemin_ffmpeg():
     """
@@ -43,7 +96,7 @@ def chemin_ffmpeg():
     """
     p = _resoudre_binaire("FFMPEG_BINARY", "ffmpeg")
     if not p:
-        raise RuntimeError("ffmpeg introuvable. Ajoute 'ffmpeg' dans packages.txt ou laisse le fallback 'imageio-ffmpeg' le télécharger.")
+        raise RuntimeError("ffmpeg introuvable. Impossible d'activer le fallback automatique.")
     return p
 
 # ---------------- Timelapse ----------------
@@ -154,11 +207,7 @@ def reencoder_video_h264(chemin_entree, chemin_sortie):
 
 def generer_timelapse(chemin_video_source, dossier_sortie, base_court, fps_cible=12, avec_flow=False):
     """
-    Pipeline timelapse complet à partir d’une vidéo existante :
-    1) Extraction d’images échantillonnées
-    2) Construction de la vidéo timelapse brute
-    3) Réencodage H.264 final
-    Retourne le chemin de la vidéo timelapse finale.
+    Pipeline timelapse complet à partir d’une vidéo existante.
     """
     dossier_images = os.path.join(dossier_sortie, f"timelapse_{fps_cible}fps_{base_court}")
     os.makedirs(dossier_images, exist_ok=True)
