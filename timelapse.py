@@ -3,6 +3,41 @@
 import os
 import cv2
 import subprocess
+import shutil
+
+# ---------------- Détection robuste des binaires ----------------
+
+def binaire_ffmpeg():
+    """
+    Retourne le chemin absolu de ffmpeg.
+    Priorité : env FFMPEG_BINARY -> shutil.which('ffmpeg') -> /usr/bin/ffmpeg
+    Lève RuntimeError si introuvable.
+    """
+    cand_env = os.environ.get("FFMPEG_BINARY")
+    if cand_env and os.path.exists(cand_env):
+        return cand_env
+    cand = shutil.which("ffmpeg")
+    if cand:
+        return cand
+    if os.path.exists("/usr/bin/ffmpeg"):
+        return "/usr/bin/ffmpeg"
+    raise RuntimeError("ffmpeg introuvable. Ajoute 'ffmpeg' dans packages.txt ou renseigne $FFMPEG_BINARY.")
+
+def binaire_ffprobe():
+    """
+    Retourne le chemin absolu de ffprobe.
+    Priorité : env FFPROBE_BINARY -> shutil.which('ffprobe') -> /usr/bin/ffprobe
+    Lève RuntimeError si introuvable.
+    """
+    cand_env = os.environ.get("FFPROBE_BINARY")
+    if cand_env and os.path.exists(cand_env):
+        return cand_env
+    cand = shutil.which("ffprobe")
+    if cand:
+        return cand
+    if os.path.exists("/usr/bin/ffprobe"):
+        return "/usr/bin/ffprobe"
+    raise RuntimeError("ffprobe introuvable. Ajoute 'ffmpeg' (qui fournit ffprobe) dans packages.txt ou renseigne $FFPROBE_BINARY.")
 
 # ---------------- Fonctions ----------------
 
@@ -93,8 +128,9 @@ def reencoder_video_h264(chemin_entree, chemin_sortie):
     """
     Réencode une vidéo en H.264 pour compatibilité maximale (lecteur web).
     """
+    ffmpeg = binaire_ffmpeg()
     commande = [
-        "ffmpeg", "-y",
+        ffmpeg, "-y",
         "-i", chemin_entree,
         "-vcodec", "libx264",
         "-preset", "fast",
