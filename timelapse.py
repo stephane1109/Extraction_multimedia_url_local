@@ -39,7 +39,7 @@ def binaire_ffprobe():
         return "/usr/bin/ffprobe"
     raise RuntimeError("ffprobe introuvable. Ajoute 'ffmpeg' (qui fournit ffprobe) dans packages.txt ou renseigne $FFPROBE_BINARY.")
 
-# ---------------- Fonctions ----------------
+# ---------------- Timelapse ----------------
 
 def appliquer_optical_flow(images):
     """
