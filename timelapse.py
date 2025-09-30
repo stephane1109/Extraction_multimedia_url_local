@@ -5,14 +5,21 @@ import cv2
 import subprocess
 import shutil
 
-# ---------------- Résolution robuste des binaires ----------------
+# Tentative de fallback vers un binaire portable via imageio-ffmpeg
+def _ffmpeg_via_imageio():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
 
 def _resoudre_binaire(nom_env, nom, chemins_standards=("/usr/bin", "/usr/local/bin", "/bin")):
     """
-    Résout le chemin d’un binaire (ffmpeg/ffprobe) :
+    Résout le chemin d’un binaire (ffmpeg) :
     1) variable d’environnement (nom_env)
     2) shutil.which(nom)
-    3) chemins standards fournis
+    3) chemins standards
+    4) imageio-ffmpeg (fallback portable)
     Renvoie le chemin trouvé ou None.
     """
     cand_env = os.environ.get(nom_env)
@@ -21,10 +28,13 @@ def _resoudre_binaire(nom_env, nom, chemins_standards=("/usr/bin", "/usr/local/b
     cand = shutil.which(nom)
     if cand:
         return cand
-    for dossier in chemins_standards:
-        p = os.path.join(dossier, nom)
+    for d in chemins_standards:
+        p = os.path.join(d, nom)
         if os.path.exists(p):
             return p
+    img = _ffmpeg_via_imageio()
+    if img and os.path.exists(img):
+        return img
     return None
 
 def chemin_ffmpeg():
@@ -33,16 +43,7 @@ def chemin_ffmpeg():
     """
     p = _resoudre_binaire("FFMPEG_BINARY", "ffmpeg")
     if not p:
-        raise RuntimeError("ffmpeg introuvable. Installe-le (packages.txt) ou renseigne $FFMPEG_BINARY.")
-    return p
-
-def chemin_ffprobe():
-    """
-    Renvoie le chemin de ffprobe, ou lève RuntimeError s’il est introuvable.
-    """
-    p = _resoudre_binaire("FFPROBE_BINARY", "ffprobe")
-    if not p:
-        raise RuntimeError("ffprobe introuvable. Installe-le (packages.txt) ou renseigne $FFPROBE_BINARY.")
+        raise RuntimeError("ffmpeg introuvable. Ajoute 'ffmpeg' dans packages.txt ou laisse le fallback 'imageio-ffmpeg' le télécharger.")
     return p
 
 # ---------------- Timelapse ----------------
