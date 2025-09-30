@@ -1,8 +1,10 @@
-# pip install streamlit yt_dlp opencv-python-headless numpy imageio-ffmpeg
+# main.py
+# Application complète : téléchargement YouTube/local, encodage Compressée/HD, extraction MP4/MP3/WAV/images,
+# timelapse export seul (avec reprise), intervalle optionnel, cookies 403, mode diagnostic yt-dl,
+# un seul bouton "Lancer le traitement", aperçu vidéo sans doublon, zip sur disque.
 
-# ---------------- Imports ----------------
 import os
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # éviter inotify côté Cloud
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # limite les reloads sur Streamlit Cloud
 
 import streamlit as st
 import subprocess
@@ -12,53 +14,51 @@ import unicodedata
 import shutil
 import zipfile
 from io import BytesIO
+from pathlib import Path
+import hashlib
 import importlib.util
-import pathlib
-import uuid
 import cv2
+
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# ---------------- Import résilient timelapse.py ----------------
-def _import_timelapse_resilient():
-    here = pathlib.Path(__file__).parent
-    try:
-        from timelapse import generer_timelapse, chemin_ffmpeg
-        return generer_timelapse, chemin_ffmpeg
-    except Exception:
-        mod_path = here / "timelapse.py"
-        if mod_path.exists():
-            spec = importlib.util.spec_from_file_location("timelapse_dynamic", str(mod_path))
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod.generer_timelapse, mod.chemin_ffmpeg
-        raise
+# Répertoires de travail hors dépôt
+BASE_DIR = Path("/tmp/appdata")
+REPERTOIRE_SORTIE = BASE_DIR / "fichiers"
+REPERTOIRE_TEMP = BASE_DIR / "tmp"
+REPERTOIRE_SORTIE.mkdir(parents=True, exist_ok=True)
+REPERTOIRE_TEMP.mkdir(parents=True, exist_ok=True)
 
-generer_timelapse, chemin_ffmpeg = _import_timelapse_resilient()
-
-# ---------------- Répertoires de travail (hors repo) ----------------
-BASE_DIR = "/tmp/appdata"
-REPERTOIRE_SORTIE = os.path.join(BASE_DIR, "fichiers")
-REPERTOIRE_TEMP = os.path.join(BASE_DIR, "tmp")
-
-# ---------------- Constantes UI ----------------
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
 LONGUEUR_TITRE_MAX = 24
 LONGUEUR_PREFIX_ID = 8
 
-# ---------------- Utilitaires ----------------
+# Import timelapse
+def _import_timelapse():
+    try:
+        import timelapse as tl
+        return tl
+    except Exception:
+        spec = importlib.util.spec_from_file_location("timelapse", str(Path("timelapse.py").resolve()))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)  # type: ignore
+        return m
+
+tl = _import_timelapse()
+
+# ---------------- Utilitaires généraux ----------------
 
 def vider_cache():
     st.cache_data.clear()
 
-def ffmpeg_disponible():
+def ffmpeg_disponible() -> bool:
     try:
-        _ = chemin_ffmpeg()
+        _ = tl.chemin_ffmpeg()
         return True
     except Exception:
         return False
 
-def nettoyer_titre(titre):
+def nettoyer_titre(titre: str) -> str:
     if not titre:
         titre = "video"
     titre = titre.replace("\n", " ").replace("\r", " ").replace("\t", " ")
@@ -74,50 +74,29 @@ def nettoyer_titre(titre):
         titre = "video"
     return titre[:LONGUEUR_TITRE_MAX]
 
-def generer_nom_base(video_id, titre):
+def generer_nom_base(video_id: str, titre: str) -> str:
     vid = (video_id or "vid")[:LONGUEUR_PREFIX_ID]
     tit = nettoyer_titre(titre)
     return f"{vid}_{tit}"
 
-def renommer_sans_collision(src_path, dest_path_base, ext=".mp4"):
-    candidat = dest_path_base + ext
+def renommer_sans_collision(src_path: Path, dest_path_base: Path, ext: str = ".mp4") -> Path:
+    candidat = Path(f"{dest_path_base}{ext}")
     i = 1
-    while os.path.exists(candidat):
-        candidat = f"{dest_path_base}_{i}{ext}"
+    while candidat.exists():
+        candidat = Path(f"{dest_path_base}_{i}{ext}")
         i += 1
-    shutil.move(src_path, candidat)
+    shutil.move(str(src_path), str(candidat))
     return candidat
 
-def taille_fichier(path):
+def taille_fichier(p: Path):
     try:
-        return os.path.getsize(path)
+        return p.stat().st_size
     except Exception:
         return None
 
-def lister_fichiers(patterns):
-    files = []
-    for p in patterns:
-        files.extend(glob.glob(p))
-    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return files
-
-def zipper_fichiers_sur_disque(fichiers, chemin_zip):
-    """
-    Crée un zip sur le disque (pas en mémoire) pour limiter l’usage RAM.
-    Renvoie le chemin du zip.
-    """
-    with zipfile.ZipFile(chemin_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for abs_path in fichiers:
-            if os.path.isfile(abs_path):
-                zf.write(abs_path, arcname=os.path.basename(abs_path))
-    return chemin_zip
-
-def duree_video_seconds(video_path):
-    """
-    Durée via OpenCV (sans ffprobe).
-    """
+def duree_video_seconds(video_path: Path):
     try:
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             return None
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -127,42 +106,50 @@ def duree_video_seconds(video_path):
     except Exception:
         return None
 
-def collecter_sorties_run(prefix):
+def zipper_sur_disque(fichiers, chemin_zip: Path) -> Path:
+    with zipfile.ZipFile(str(chemin_zip), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for f in fichiers:
+            f = Path(f)
+            if f.is_file():
+                zf.write(str(f), arcname=f.name)
+    return chemin_zip
+
+def lister_sorties(prefix: str):
     patterns = [
-        os.path.join(REPERTOIRE_SORTIE, f"{prefix}*.mp4"),
-        os.path.join(REPERTOIRE_SORTIE, f"{prefix}*.mp3"),
-        os.path.join(REPERTOIRE_SORTIE, f"{prefix}*.wav"),
-        os.path.join(REPERTOIRE_SORTIE, f"img1_{prefix}", "i_*.jpg"),
-        os.path.join(REPERTOIRE_SORTIE, f"img25_{prefix}", "i_*.jpg"),
-        os.path.join(REPERTOIRE_SORTIE, f"img1_full_{prefix}", "i_*.jpg"),
-        os.path.join(REPERTOIRE_SORTIE, f"img25_full_{prefix}", "i_*.jpg"),
-        os.path.join(REPERTOIRE_SORTIE, f"timelapse_*_{prefix}", "*.jpg"),
+        str(REPERTOIRE_SORTIE / f"{prefix}*.mp4"),
+        str(REPERTOIRE_SORTIE / f"{prefix}*.mp3"),
+        str(REPERTOIRE_SORTIE / f"{prefix}*.wav"),
+        str(REPERTOIRE_SORTIE / f"img1_{prefix}" / "i_*.jpg"),
+        str(REPERTOIRE_SORTIE / f"img25_{prefix}" / "i_*.jpg"),
+        str(REPERTOIRE_SORTIE / f"img1_full_{prefix}" / "i_*.jpg"),
+        str(REPERTOIRE_SORTIE / f"img25_full_{prefix}" / "i_*.jpg"),
     ]
-    return lister_fichiers(patterns)
+    files = []
+    for pat in patterns:
+        files.extend(glob.glob(pat))
+    files = [Path(p) for p in files]
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return files
 
-def copier_upload_local_stable(uploader, titre_hint="local"):
-    if uploader is None:
-        return None, None
-    base = generer_nom_base("local", nettoyer_titre(os.path.splitext(uploader.name)[0] or titre_hint))
-    dest = os.path.join(REPERTOIRE_TEMP, f"{base}_upload.mp4")
-    with open(dest, "wb") as f:
-        f.write(uploader.read())
-    return dest, base
-
-class _SilentLogger:
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg): pass
+def hash_job(source_id: str, fps: int, avec_flow: bool, intervalle):
+    h = hashlib.sha1()
+    h.update(source_id.encode("utf-8"))
+    h.update(str(fps).encode("utf-8"))
+    h.update(b"flow" if avec_flow else b"noflow")
+    if intervalle:
+        h.update(f"{intervalle[0]}-{intervalle[1]}".encode("utf-8"))
+    return h.hexdigest()[:16]
 
 # ---------------- Téléchargement / préparation vidéo ----------------
 
-def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_intervalle, debut, fin):
+def telecharger_preparer_video(url: str, cookies_path: Path, verbose: bool, qualite: str,
+                               utiliser_intervalle: bool, debut: int, fin: int):
     st.write("Téléchargement / préparation de la vidéo en cours...")
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
     http_headers = {'User-Agent': user_agent, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.5', 'Referer': 'https://www.youtube.com/'}
 
     base_opts = {
-        'paths': {'home': REPERTOIRE_SORTIE},
+        'paths': {'home': str(REPERTOIRE_SORTIE)},
         'outtmpl': {'default': '%(id)s.%(ext)s'},
         'noplaylist': True,
         'quiet': not verbose,
@@ -180,12 +167,18 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
         'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}},
     }
     if not verbose:
+        class _SilentLogger:
+            def debug(self, msg): pass
+            def warning(self, msg): pass
+            def error(self, msg): pass
         base_opts['logger'] = _SilentLogger()
+
     if utiliser_intervalle:
         base_opts['download_sections'] = [{'section': f"*{debut}-{fin}"}]
         base_opts['force_keyframes_at_cuts'] = True
+
     if cookies_path:
-        base_opts['cookiefile'] = cookies_path
+        base_opts['cookiefile'] = str(cookies_path)
 
     formats_fallbacks = [
         "bv*[ext=mp4][height<=2160]+ba[ext=m4a]/b[ext=mp4]/b",
@@ -195,6 +188,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
     derniere_erreur = None
     info = None
     fichier_final = None
+
     for fmt in formats_fallbacks:
         ydl_opts = base_opts.copy()
         ydl_opts['format'] = fmt
@@ -202,9 +196,12 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 _ = ydl.prepare_filename(info)
-            candidats = lister_fichiers([os.path.join(REPERTOIRE_SORTIE, f"*.{ext}") for ext in ['mp4','mkv','webm','m4a','mp3']])
+            candidats = []
+            for ext in ['mp4', 'mkv', 'webm', 'm4a', 'mp3']:
+                candidats.extend(REPERTOIRE_SORTIE.glob(f"*.{ext}"))
             if not candidats:
                 raise DownloadError("Téléchargement terminé mais aucun fichier détecté (download is empty).")
+            candidats.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             fichier_final = candidats[0]
             break
         except Exception as e:
@@ -212,7 +209,7 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
             derniere_erreur = e
             if "403" in msg or "Forbidden" in msg:
                 if not cookies_path:
-                    return None, None, None, "HTTP 403 détecté. La vidéo semble restreinte. Fournis un fichier cookies.txt (Firefox : cookies.txt) puis relance."
+                    return None, None, None, "HTTP 403 détecté. La vidéo est restreinte. Fournis un fichier cookies.txt (Firefox : cookies.txt) puis relance."
                 return None, None, None, "HTTP 403 persistant malgré cookies. Vérifie que le cookies.txt est valide et récent."
             continue
 
@@ -220,132 +217,174 @@ def telecharger_preparer_video(url, cookies_path, verbose, qualite, utiliser_int
         return None, None, None, (str(derniere_erreur) if derniere_erreur else "Echec inconnu au téléchargement.")
 
     video_id = (info.get('id') if info else "vid") or "vid"
-    titre_brut = (info.get('title') if info else os.path.splitext(os.path.basename(fichier_final))[0]) or "video"
+    titre_brut = (info.get('title') if info else fichier_final.stem) or "video"
     base_court = generer_nom_base(video_id, titre_brut)
 
-    ext_src = os.path.splitext(fichier_final)[1]
-    src_base = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_src")
+    ext_src = fichier_final.suffix
+    src_base = REPERTOIRE_SORTIE / f"{base_court}_src"
     chemin_source_propre = renommer_sans_collision(fichier_final, src_base, ext=ext_src)
 
-    cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
-    ffmpeg = chemin_ffmpeg()
+    cible = REPERTOIRE_SORTIE / f"{base_court}_video.mp4"
+
+    try:
+        ffmpeg = tl.chemin_ffmpeg()
+    except Exception as e:
+        return None, None, None, f"ffmpeg introuvable : {e}"
 
     def _run_ffmpeg(args):
         subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     if qualite == "Compressée (1280p, CRF 28)":
         try:
-            _run_ffmpeg([ffmpeg, "-y", "-i", chemin_source_propre, "-vf", "scale=1280:-2",
-                         "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible])
+            if utiliser_intervalle:
+                _run_ffmpeg([ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", str(chemin_source_propre),
+                             "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(cible)])
+            else:
+                _run_ffmpeg([ffmpeg, "-y", "-i", str(chemin_source_propre),
+                             "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(cible)])
         except Exception as e:
             return None, None, None, f"Echec de la compression : {e}"
     else:
         try:
-            _run_ffmpeg([ffmpeg, "-y", "-i", chemin_source_propre, "-c", "copy", "-movflags", "+faststart", cible])
+            if utiliser_intervalle:
+                _run_ffmpeg([ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", str(chemin_source_propre),
+                             "-c", "copy", "-movflags", "+faststart", str(cible)])
+            else:
+                _run_ffmpeg([ffmpeg, "-y", "-i", str(chemin_source_propre), "-c", "copy", "-movflags", "+faststart", str(cible)])
         except Exception:
             try:
-                _run_ffmpeg([ffmpeg, "-y", "-i", chemin_source_propre,
+                _run_ffmpeg([ffmpeg, "-y", "-i", str(chemin_source_propre),
                              "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cible])
+                             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(cible)])
             except Exception as e:
                 return None, None, None, f"Echec du remux/transcodage : {e}"
 
     try:
-        if os.path.exists(chemin_source_propre):
-            os.remove(chemin_source_propre)
+        if chemin_source_propre.exists():
+            chemin_source_propre.unlink()
     except Exception:
         pass
 
-    return cible, base_court, info, None
+    return str(cible), base_court, info, None
+
+def traiter_local(src_local: Path, base_court: str, qualite: str, utiliser_intervalle: bool, debut: int, fin: int) -> str:
+    try:
+        ffmpeg = tl.chemin_ffmpeg()
+    except Exception as e:
+        raise RuntimeError(f"ffmpeg introuvable : {e}")
+
+    cible = REPERTOIRE_SORTIE / f"{base_court}_video.mp4"
+    def _run_ffmpeg(args):
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+    if qualite == "Compressée (1280p, CRF 28)":
+        args = [ffmpeg, "-y"]
+        if utiliser_intervalle:
+            args += ["-ss", str(debut), "-to", str(fin)]
+        args += ["-i", str(src_local), "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                 "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(cible)]
+        _run_ffmpeg(args)
+    else:
+        try:
+            args = [ffmpeg, "-y"]
+            if utiliser_intervalle:
+                args += ["-ss", str(debut), "-to", str(fin)]
+            args += ["-i", str(src_local), "-c", "copy", "-movflags", "+faststart", str(cible)]
+            _run_ffmpeg(args)
+        except Exception:
+            args = [ffmpeg, "-y"]
+            if utiliser_intervalle:
+                args += ["-ss", str(debut), "-to", str(fin)]
+            args += ["-i", str(src_local), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(cible)]
+            _run_ffmpeg(args)
+    return str(cible)
 
 # ---------------- Extraction des ressources ----------------
 
-def extraire_ressources(video_path, debut, fin, base_court, options, utiliser_intervalle):
+def extraire_ressources(video_path: str, debut: int, fin: int, base_court: str, options: dict, utiliser_intervalle: bool):
     try:
-        ffmpeg = chemin_ffmpeg()
-
-        def _run_ffmpeg(args):
-            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-
-        def cmd_segment(sortie):
-            if utiliser_intervalle:
-                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
-                        "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", sortie]
-            else:
-                return [ffmpeg, "-y", "-i", video_path,
-                        "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", sortie]
-
-        def cmd_audio(sortie, codec_args):
-            if utiliser_intervalle:
-                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
-            else:
-                return [ffmpeg, "-y", "-i", video_path] + codec_args + ["-movflags", "+faststart", sortie]
-
-        def cmd_images(output_pattern, fps):
-            vf = f"fps={fps},scale=1920:1080"
-            if utiliser_intervalle:
-                return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
-            else:
-                return [ffmpeg, "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
-
-        if options.get("mp4"):
-            nom = f"{base_court}_seg.mp4" if utiliser_intervalle else f"{base_court}_full.mp4"
-            _run_ffmpeg(cmd_segment(os.path.join(REPERTOIRE_SORTIE, nom)))
-
-        if options.get("mp3"):
-            nom = f"{base_court}_seg.mp3" if utiliser_intervalle else f"{base_court}_full.mp3"
-            _run_ffmpeg(cmd_audio(os.path.join(REPERTOIRE_SORTIE, nom), ["-vn", "-acodec", "libmp3lame", "-q:a", "5"]))
-
-        if options.get("wav"):
-            nom = f"{base_court}_seg.wav" if utiliser_intervalle else f"{base_court}_full.wav"
-            _run_ffmpeg(cmd_audio(os.path.join(REPERTOIRE_SORTIE, nom), ["-vn", "-acodec", "adpcm_ima_wav"]))
-
-        if options.get("img1") or options.get("img25"):
-            for fps in [1, 25]:
-                if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
-                    dossier = f"img{fps}_{base_court}" if utiliser_intervalle else f"img{fps}_full_{base_court}"
-                    rep = os.path.join(REPERTOIRE_SORTIE, dossier)
-                    os.makedirs(rep, exist_ok=True)
-                    tmp_pattern = os.path.join(rep, "tmp_%06d.jpg")
-                    _run_ffmpeg(cmd_images(tmp_pattern, fps))
-                    images_gen = sorted(glob.glob(os.path.join(rep, "tmp_*.jpg")))
-                    start_offset = debut if utiliser_intervalle else 0
-                    for i, src in enumerate(images_gen):
-                        t = start_offset + (i / float(fps))
-                        sec = int(t)
-                        if fps == 1:
-                            nom_cible = f"i_{sec}s_1fps.jpg"
-                        else:
-                            f_in_s = int(round((t - sec) * fps))
-                            if f_in_s >= fps:
-                                f_in_s = fps - 1
-                            nom_cible = f"i_{sec}s_{fps}fps_{f_in_s:02d}.jpg"
-                        dst = os.path.join(rep, nom_cible)
-                        j = 1
-                        base_dst, ext = os.path.splitext(dst)
-                        while os.path.exists(dst):
-                            dst = f"{base_dst}_{j}{ext}"
-                            j += 1
-                        os.replace(src, dst)
-        return None
+        ffmpeg = tl.chemin_ffmpeg()
     except Exception as e:
-        return str(e)
+        return f"ffmpeg introuvable : {e}"
+
+    def _run_ffmpeg(args):
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+    def cmd_segment(sortie: Path):
+        if utiliser_intervalle:
+            return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path,
+                    "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(sortie)]
+        else:
+            return [ffmpeg, "-y", "-i", video_path,
+                    "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(sortie)]
+
+    def cmd_audio(sortie: Path, codec_args):
+        if utiliser_intervalle:
+            return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path] + codec_args + ["-movflags", "+faststart", str(sortie)]
+        else:
+            return [ffmpeg, "-y", "-i", video_path] + codec_args + ["-movflags", "+faststart", str(sortie)]
+
+    def cmd_images(output_pattern: str, fps: int):
+        vf = f"fps={fps},scale=1920:1080"
+        if utiliser_intervalle:
+            return [ffmpeg, "-y", "-ss", str(debut), "-to", str(fin), "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+        else:
+            return [ffmpeg, "-y", "-i", video_path, "-vf", vf, "-q:v", "1", output_pattern]
+
+    if options.get("mp4"):
+        nom = f"{base_court}_seg.mp4" if utiliser_intervalle else f"{base_court}_full.mp4"
+        _run_ffmpeg(cmd_segment(REPERTOIRE_SORTIE / nom))
+
+    if options.get("mp3"):
+        nom = f"{base_court}_seg.mp3" if utiliser_intervalle else f"{base_court}_full.mp3"
+        _run_ffmpeg(cmd_audio(REPERTOIRE_SORTIE / nom, ["-vn", "-acodec", "libmp3lame", "-q:a", "5"]))
+
+    if options.get("wav"):
+        nom = f"{base_court}_seg.wav" if utiliser_intervalle else f"{base_court}_full.wav"
+        _run_ffmpeg(cmd_audio(REPERTOIRE_SORTIE / nom, ["-vn", "-acodec", "adpcm_ima_wav"]))
+
+    if options.get("img1") or options.get("img25"):
+        for fps in [1, 25]:
+            if (fps == 1 and options.get("img1")) or (fps == 25 and options.get("img25")):
+                dossier = f"img{fps}_{base_court}" if utiliser_intervalle else f"img{fps}_full_{base_court}"
+                rep = REPERTOIRE_SORTIE / dossier
+                rep.mkdir(parents=True, exist_ok=True)
+                tmp_pattern = str(rep / "tmp_%06d.jpg")
+                _run_ffmpeg(cmd_images(tmp_pattern, fps))
+                images_gen = sorted(rep.glob("tmp_*.jpg"))
+                start_offset = debut if utiliser_intervalle else 0
+                for i, src in enumerate(images_gen):
+                    t = start_offset + (i / float(fps))
+                    sec = int(t)
+                    if fps == 1:
+                        nom_cible = f"i_{sec}s_1fps.jpg"
+                    else:
+                        f_in_s = int(round((t - sec) * fps))
+                        if f_in_s >= fps:
+                            f_in_s = fps - 1
+                        nom_cible = f"i_{sec}s_{fps}fps_{f_in_s:02d}.jpg"
+                    dst = rep / nom_cible
+                    j = 1
+                    base_dst = dst.with_suffix("")
+                    ext = dst.suffix
+                    while dst.exists():
+                        dst = Path(f"{base_dst}_{j}{ext}")
+                        j += 1
+                    os.replace(str(src), str(dst))
+
+    return None
 
 # ---------------- Interface utilisateur ----------------
-
-if "boot_id" not in st.session_state:
-    st.session_state["boot_id"] = str(uuid.uuid4())
-BOOT_ID = st.session_state["boot_id"]
 
 st.title("Extraction multimédia (vidéo, audio, images)")
 st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
 
 vider_cache()
-os.makedirs(REPERTOIRE_SORTIE, exist_ok=True)
-os.makedirs(REPERTOIRE_TEMP, exist_ok=True)
 
 st.markdown(
     "Par défaut, l’extraction porte sur **toute la vidéo**. Vous pouvez activer un intervalle personnalisé si besoin. "
@@ -355,28 +394,30 @@ st.markdown(
 
 with st.expander("Diagnostic système"):
     try:
-        chemin = chemin_ffmpeg()
+        chemin = tl.chemin_ffmpeg()
         ver = subprocess.run([chemin, "-version"], capture_output=True, text=True, check=False)
         st.write(f"ffmpeg : {chemin}")
         if ver.stdout:
             st.code(ver.stdout.splitlines()[0])
     except Exception as e:
         st.write(f"ffmpeg : introuvable ({e})")
-    st.write(f"Session ID : {BOOT_ID}")
 
+# Etats
 st.session_state.setdefault("debut_secs", 0)
 st.session_state.setdefault("fin_secs", 10)
-st.session_state.setdefault("local_temp_path", None)
-st.session_state.setdefault("local_name_base", None)
 st.session_state.setdefault("video_base", None)
 st.session_state.setdefault("base_court", None)
 st.session_state.setdefault("apercu_local_bytes", None)
 st.session_state.setdefault("upload_signature", None)
+st.session_state.setdefault("local_temp_path", None)
+st.session_state.setdefault("local_name_base", None)
 
+# Source
 url = st.text_input("URL YouTube")
 cookies_file = st.file_uploader("Fichier cookies.txt (optionnel)", type=["txt"])
 fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
 
+# Options
 mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
 qualite = st.radio("Qualité de la vidéo de base", ["Compressée (1280p, CRF 28)", "HD (max qualité dispo)"], index=0)
 
@@ -390,10 +431,9 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-# Si Timelapse sélectionné, on bascule en mode "export seul timelapse"
+# Si Timelapse, export seul
 if opt_timelapse:
-    st.info("Mode timelapse activé : l’application n’affichera aucune vidéo, elle générera uniquement le fichier timelapse à télécharger.")
-    # Neutraliser toutes les autres sorties pour éviter du travail inutile
+    st.info("Mode timelapse activé : l’application n’affichera aucune vidéo. Elle générera uniquement le fichier timelapse à télécharger.")
     opt_mp4 = False
     opt_mp3 = False
     opt_wav = False
@@ -422,52 +462,51 @@ if etendue == "Intervalle personnalisé":
 else:
     utiliser_intervalle = False
 
-# Aperçu vidéo uniquement si timelapse n’est PAS sélectionné
+# Aperçu vidéo uniquement si timelapse n’est pas sélectionné
 afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=opt_timelapse)
 if afficher_apercu and not opt_timelapse:
-    if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
-        size = taille_fichier(st.session_state['video_base']) or 0
+    if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
+        size = taille_fichier(Path(st.session_state['video_base'])) or 0
         if size <= SEUIL_APERCU_OCTETS:
             with open(st.session_state['video_base'], "rb") as f:
                 st.video(f.read(), format="video/mp4")
-    elif fichier_local is not None and st.session_state.get('apercu_local_bytes'):
-        if st.session_state['apercu_local_bytes']:
+    elif fichier_local is not None:
+        signature = f"{fichier_local.name}-{fichier_local.size}"
+        if signature != st.session_state['upload_signature']:
+            tmp = REPERTOIRE_TEMP / f"local_upload_{signature}.mp4"
+            with open(tmp, "wb") as g:
+                g.write(fichier_local.read())
+            st.session_state['upload_signature'] = signature
+            st.session_state['apercu_local_bytes'] = None
+            try:
+                data = tmp.read_bytes()
+                st.session_state['apercu_local_bytes'] = data if len(data) <= SEUIL_APERCU_OCTETS else b""
+            except Exception:
+                st.session_state['apercu_local_bytes'] = b""
+            st.session_state['local_temp_path'] = str(tmp)
+            st.session_state['local_name_base'] = generer_nom_base("local", Path(fichier_local.name).stem)
+        if st.session_state.get('apercu_local_bytes'):
             st.video(st.session_state['apercu_local_bytes'], format="video/mp4")
         else:
             st.info("Fichier local volumineux : aperçu désactivé (lance le traitement).")
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# Stabilisation upload local
-if fichier_local is not None:
-    signature = f"{fichier_local.name}-{fichier_local.size}"
-    if signature != st.session_state['upload_signature']:
-        temp_path, base_local = copier_upload_local_stable(fichier_local)
-        if temp_path:
-            st.session_state['local_temp_path'] = temp_path
-            st.session_state['local_name_base'] = base_local
-            st.session_state['upload_signature'] = signature
-            if not opt_timelapse:  # pas d’aperçu en mode timelapse
-                try:
-                    with open(temp_path, "rb") as f:
-                        data = f.read()
-                    st.session_state['apercu_local_bytes'] = data if len(data) <= SEUIL_APERCU_OCTETS else b""
-                except Exception:
-                    st.session_state['apercu_local_bytes'] = b""
-
 # Bouton unique
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
+        # Cookies
         cookies_path = None
         if cookies_file is not None:
-            cookies_path = os.path.join(REPERTOIRE_SORTIE, "cookies.txt")
+            cookies_path = REPERTOIRE_SORTIE / "cookies.txt"
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
+        # Vérif ffmpeg (et fallback possible)
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
-            # Préparer vidéo de base
+            # Préparation de la vidéo de base
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path, mode_verbose, qualite, utiliser_intervalle,
@@ -479,86 +518,62 @@ if st.button("Lancer le traitement"):
                 else:
                     st.session_state['video_base'] = video_base
                     st.session_state['base_court'] = base_court
-                    st.success(f"Vidéo prête : {os.path.basename(video_base)}")
+                    st.success(f"Vidéo prête : {Path(video_base).name}")
             elif st.session_state.get('local_temp_path'):
                 base_court = st.session_state.get('local_name_base') or generer_nom_base("local", "video")
-                src_local = st.session_state['local_temp_path']
-                cible = os.path.join(REPERTOIRE_SORTIE, f"{base_court}_video.mp4")
-                ffmpeg = chemin_ffmpeg()
-                def _run_ffmpeg(args):
-                    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 try:
-                    if qualite == "Compressée (1280p, CRF 28)":
-                        args = [ffmpeg, "-y"]
-                        if utiliser_intervalle:
-                            args += ["-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"])]
-                        args += ["-i", src_local, "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
-                                 "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", cible]
-                        _run_ffmpeg(args)
-                    else:
-                        args = [ffmpeg, "-y"]
-                        if utiliser_intervalle:
-                            args += ["-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"])]
-                        args += ["-i", src_local, "-c", "copy", "-movflags", "+faststart", cible]
-                        _run_ffmpeg(args)
-                except Exception:
-                    args = [ffmpeg, "-y"]
-                    if utiliser_intervalle:
-                        args += ["-ss", str(st.session_state["debut_secs"]), "-to", str(st.session_state["fin_secs"])]
-                    args += ["-i", src_local, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cible]
-                    try:
-                        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                    except Exception as e:
-                        st.error(f"Echec du traitement local : {e}")
-                        cible = None
-                finally:
-                    if cible:
-                        st.session_state['video_base'] = cible
-                        st.session_state['base_court'] = base_court
-                        st.success(f"Vidéo prête : {os.path.basename(cible)}")
+                    cible = traiter_local(Path(st.session_state['local_temp_path']), base_court, qualite, utiliser_intervalle,
+                                          st.session_state["debut_secs"], st.session_state["fin_secs"])
+                    st.session_state['video_base'] = cible
+                    st.session_state['base_court'] = base_court
+                    st.success(f"Vidéo prête : {Path(cible).name}")
+                except Exception as e:
+                    st.error(f"Echec du traitement local : {e}")
             else:
                 st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
-            # Si on a une vidéo prête, lancer la production demandée
-            if st.session_state.get('video_base') and os.path.exists(st.session_state['video_base']):
+            # Production
+            if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
                 base_court = st.session_state['base_court']
+                video_path = st.session_state['video_base']
 
+                # Mode timelapse : export seul + reprise
                 if opt_timelapse:
                     try:
-                        sortie_timelapse = generer_timelapse(
-                            st.session_state['video_base'], REPERTOIRE_SORTIE, base_court,
-                            fps_cible=fps_timelapse, avec_flow=opt_flow
-                        )
-                        st.success(f"Timelapse généré : {os.path.basename(sortie_timelapse)}")
-                        # Préparer un zip minimal uniquement avec le timelapse
-                        zip_path = os.path.join(REPERTOIRE_SORTIE, f"resultats_timelapse_{base_court}.zip")
-                        zipper_fichiers_sur_disque([sortie_timelapse], zip_path)
-                        with open(zip_path, "rb") as fh:
-                            st.download_button("Télécharger le timelapse (.zip)", data=fh, file_name=os.path.basename(zip_path), mime="application/zip")
+                        # Identifiant stable du job timelapse (reprise)
+                        source_id = f"file:{video_path}"
+                        intervalle = (st.session_state["debut_secs"], st.session_state["fin_secs"]) if utiliser_intervalle else None
+                        job_id = hash_job(source_id, fps_timelapse, opt_flow, intervalle)
+                        out_path, nb_images = tl.executer_timelapse(video_path, job_id, base_court, fps_timelapse, opt_flow,
+                                                                    st.session_state["debut_secs"] if utiliser_intervalle else None,
+                                                                    st.session_state["fin_secs"] if utiliser_intervalle else None)
+                        st.success(f"Timelapse généré ({nb_images} images).")
+                        with open(out_path, "rb") as fh:
+                            st.download_button("Télécharger le timelapse (.mp4)", data=fh, file_name=Path(out_path).name, mime="video/mp4")
                     except Exception as e:
                         st.error(f"Echec du timelapse : {e}")
                 else:
-                    # Mode extraction classique
+                    # Extraction classique
                     if utiliser_intervalle:
                         debut_eff = st.session_state["debut_secs"]
                         fin_eff = st.session_state["fin_secs"]
                     else:
-                        duree = duree_video_seconds(st.session_state['video_base']) or 0
+                        duree = duree_video_seconds(Path(video_path)) or 0
                         debut_eff, fin_eff = 0, duree
 
                     options = {"mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
                     if any(options.values()):
-                        err2 = extraire_ressources(st.session_state['video_base'], debut_eff, fin_eff, base_court, options, utiliser_intervalle)
+                        err2 = extraire_ressources(video_path, debut_eff, fin_eff, base_court, options, utiliser_intervalle)
                         if err2:
                             st.error(f"Erreur pendant l'extraction : {err2}")
                         else:
                             st.success("Ressources générées.")
-                    # Zip complet
-                    fichiers_run = collecter_sorties_run(base_court)
-                    if st.session_state['video_base'] not in fichiers_run:
-                        fichiers_run.append(st.session_state['video_base'])
-                    zip_path = os.path.join(REPERTOIRE_SORTIE, f"resultats_{base_court}.zip")
-                    zipper_fichiers_sur_disque(fichiers_run, zip_path)
+
+                    # Préparer le zip sur disque
+                    fichiers = lister_sorties(base_court)
+                    if Path(video_path) not in fichiers:
+                        fichiers.append(Path(video_path))
+                    zip_path = REPERTOIRE_SORTIE / f"resultats_{base_court}.zip"
+                    zipper_sur_disque(fichiers, zip_path)
                     with open(zip_path, "rb") as fh:
-                        st.download_button("Télécharger les résultats (.zip)", data=fh, file_name=os.path.basename(zip_path), mime="application/zip")
+                        st.download_button("Télécharger les résultats (.zip)", data=fh, file_name=zip_path.name, mime="application/zip")
