@@ -1,9 +1,13 @@
 # main.py
-# Application complète, intégrant cookies.py (gestion cookies à part),
-# toutes les fonctionnalités : un seul bouton, intervalle optionnel,
-# Mode diagnostic yt-dl, choix Compressée/HD, timelapse export seul avec reprise,
-# extraction MP4/MP3/WAV/images avec numérotation i_{sec}s_{fps}fps_{frame}.jpg,
-# zip sur disque, aperçu vidéo sans doublon.
+# Application complète SANS optical flow :
+# - un seul bouton
+# - intervalle optionnel (par défaut toute la vidéo)
+# - cookies persistants via cookies.py
+# - choix Compressée/HD
+# - timelapse export seul avec reprise (pas d’aperçu)
+# - extraction MP4/MP3/WAV/Images avec numérotation i_{sec}s_{fps}fps_{frame}.jpg
+# - zip sur disque
+# - aperçu vidéo sans doublon quand le timelapse n’est pas coché
 
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -36,7 +40,7 @@ def _import_timelapse():
 
 tl = _import_timelapse()
 
-# Import cookies (nom du fichier demandé : cookies.py)
+# Import cookies
 def _import_cookies():
     try:
         import cookies as ck
@@ -145,11 +149,10 @@ def lister_sorties(prefix: str):
     files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     return files
 
-def hash_job(source_id: str, fps: int, avec_flow: bool, intervalle):
+def hash_job(source_id: str, fps: int, intervalle):
     h = hashlib.sha1()
     h.update(source_id.encode("utf-8"))
     h.update(str(fps).encode("utf-8"))
-    h.update(b"flow" if avec_flow else b"noflow")
     if intervalle:
         h.update(f"{intervalle[0]}-{intervalle[1]}".encode("utf-8"))
     return h.hexdigest()[:16]
@@ -415,7 +418,6 @@ with st.expander("Diagnostic système"):
             st.code(ver.stdout.splitlines()[0])
     except Exception as e:
         st.write(f"ffmpeg : introuvable ({e})")
-    st.write(ck.info_cookies(REPERTOIRE_SORTIE))
 
 # Etats
 st.session_state.setdefault("debut_secs", 0)
@@ -429,11 +431,10 @@ st.session_state.setdefault("local_name_base", None)
 
 # Source
 url = st.text_input("URL YouTube")
-
-# Bloc cookies (module séparé)
-cookies_path_eff = ck.afficher_section_cookies(REPERTOIRE_SORTIE)
-
 fichier_local = st.file_uploader("Ou importer un fichier vidéo (.mp4)", type=["mp4"])
+
+# Cookies (module séparé)
+cookies_path_eff = ck.afficher_section_cookies(REPERTOIRE_SORTIE)
 
 # Options
 mode_verbose = st.checkbox("Mode diagnostic yt-dl", value=False)
@@ -447,7 +448,8 @@ with c2: opt_mp3 = st.checkbox("MP3", key="opt_mp3")
 with c3: opt_wav = st.checkbox("WAV", key="opt_wav")
 with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
-with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
+with c6:
+    opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
 if opt_timelapse:
     st.info("Mode timelapse activé : l’application n’affichera aucune vidéo. Elle générera uniquement le fichier timelapse à télécharger.")
@@ -456,14 +458,9 @@ if opt_timelapse:
     opt_wav = False
     opt_img1 = False
     opt_img25 = False
-    col_t1, col_t2 = st.columns([1,1])
-    with col_t1:
-        fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
-    with col_t2:
-        opt_flow = st.checkbox("Flux optique (overlay)", value=False, key="opt_flow")
+    fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
 else:
     fps_timelapse = 12
-    opt_flow = False
 
 st.subheader("Étendue")
 etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
@@ -514,6 +511,7 @@ if st.button("Lancer le traitement"):
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
+            # Préparation de la vidéo de base
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path_eff, mode_verbose, qualite, utiliser_intervalle,
@@ -539,6 +537,7 @@ if st.button("Lancer le traitement"):
             else:
                 st.warning("Veuillez fournir une URL YouTube ou un fichier local.")
 
+            # Production
             if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
                 base_court = st.session_state['base_court']
                 video_path = st.session_state['video_base']
@@ -547,10 +546,9 @@ if st.button("Lancer le traitement"):
                     try:
                         source_id = f"file:{video_path}"
                         intervalle = (st.session_state["debut_secs"], st.session_state["fin_secs"]) if utiliser_intervalle else None
-                        job_id = hash_job(source_id, st.session_state.get("fps_timelapse", 12), st.session_state.get("opt_flow", False), intervalle)
+                        job_id = hash_job(source_id, st.session_state.get("fps_timelapse", 12), intervalle)
                         out_path, nb_images = tl.executer_timelapse(
                             video_path, job_id, base_court, st.session_state.get("fps_timelapse", 12),
-                            st.session_state.get("opt_flow", False),
                             st.session_state["debut_secs"] if utiliser_intervalle else None,
                             st.session_state["fin_secs"] if utiliser_intervalle else None
                         )
