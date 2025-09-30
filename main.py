@@ -1,4 +1,4 @@
-# pip install streamlit yt_dlp opencv-python-headless imageio-ffmpeg numpy
+# pip install streamlit yt_dlp opencv-python-headless imageio-ffmpeg numpy requests
 
 # ---------------- Imports ----------------
 import os
@@ -111,7 +111,7 @@ def zipper_fichiers(fichiers, nom_zip_sans_ext):
 
 def duree_video_seconds(video_path):
     """
-    Calcule la durée sans ffprobe, via OpenCV (fallback universel).
+    Calcule la durée via OpenCV (sans ffprobe).
     """
     try:
         cap = cv2.VideoCapture(video_path)
@@ -361,12 +361,16 @@ st.markdown(
     "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)."
 )
 
-# Panneau de diagnostic minimal
+# Diagnostic
 with st.expander("Diagnostic système"):
     try:
-        st.write(f"ffmpeg : {chemin_ffmpeg()}")
-    except Exception:
-        st.write("ffmpeg : introuvable")
+        chemin = chemin_ffmpeg()
+        ver = subprocess.run([chemin, "-version"], capture_output=True, text=True, check=False)
+        st.write(f"ffmpeg : {chemin}")
+        if ver.stdout:
+            st.code(ver.stdout.splitlines()[0])
+    except Exception as e:
+        st.write(f"ffmpeg : introuvable ({e})")
 
 # Etats initiaux
 st.session_state.setdefault("debut_secs", 0)
@@ -466,9 +470,9 @@ if st.button("Lancer le traitement"):
             with open(cookies_path, "wb") as f:
                 f.write(cookies_file.read())
 
-        # Vérif ffmpeg (avec fallback imageio-ffmpeg)
+        # Vérif ffmpeg (avec fallback automatique)
         if not ffmpeg_disponible():
-            st.error("ffmpeg introuvable et fallback impossible. Ajoute 'imageio-ffmpeg' dans requirements.txt ou définis $FFMPEG_BINARY.")
+            st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
             # Préparer vidéo (URL ou local)
             if url:
