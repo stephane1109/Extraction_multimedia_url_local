@@ -1,10 +1,10 @@
 # main.py
-# Application complète sans optical flow, correctifs :
-# - Appel de executer_timelapse AVEC arguments nommés (debut=..., fin=...)
-# - Exclusivité claire entre timelapse et autres ressources (décochage état UI)
-# - Le reste inchangé : cookies persistants (cookies.py), un seul bouton,
-#   intervalle optionnel (par défaut toute la vidéo), choix Compressée/HD,
-#   extraction MP4/MP3/WAV/Images avec numérotation, zip final, aperçu sans doublon.
+# Application complète sans optical flow, correctif exclusivité Timelapse :
+# - AUCUNE écriture programmatique dans st.session_state pour « décocher » des widgets.
+# - L’exclusivité « Timelapse » est gérée logiquement : si Timelapse est coché, on ignore MP4/MP3/WAV/Images.
+# - Un seul bouton, intervalle optionnel (par défaut toute la vidéo), cookies persistants (cookies.py),
+#   choix Compressée/HD, timelapse export seul avec reprise, numérotation images,
+#   zip final, aperçu sans doublon.
 
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -23,6 +23,8 @@ import cv2
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+
+# -------- Imports modules locaux --------
 
 def _import_timelapse():
     try:
@@ -48,6 +50,8 @@ def _import_cookies():
 
 ck = _import_cookies()
 
+# -------- Répertoires de travail --------
+
 BASE_DIR = Path("/tmp/appdata")
 REPERTOIRE_SORTIE = BASE_DIR / "fichiers"
 REPERTOIRE_TEMP = BASE_DIR / "tmp"
@@ -57,6 +61,8 @@ REPERTOIRE_TEMP.mkdir(parents=True, exist_ok=True)
 SEUIL_APERCU_OCTETS = 160 * 1024 * 1024
 LONGUEUR_TITRE_MAX = 24
 LONGUEUR_PREFIX_ID = 8
+
+# -------- Utilitaires généraux --------
 
 def vider_cache():
     st.cache_data.clear()
@@ -142,13 +148,14 @@ def lister_sorties(prefix: str):
     return files
 
 def hash_job(source_id: str, fps: int, intervalle):
-    import hashlib
     h = hashlib.sha1()
     h.update(source_id.encode("utf-8"))
     h.update(str(fps).encode("utf-8"))
     if intervalle:
         h.update(f"{intervalle[0]}-{intervalle[1]}".encode("utf-8"))
     return h.hexdigest()[:16]
+
+# -------- Téléchargement / préparation vidéo --------
 
 def telecharger_preparer_video(url: str, cookies_path: Path | None, verbose: bool, qualite: str,
                                utiliser_intervalle: bool, debut: int, fin: int):
@@ -310,6 +317,8 @@ def traiter_local(src_local: Path, base_court: str, qualite: str, utiliser_inter
             _run_ffmpeg(args)
     return str(cible)
 
+# -------- Extraction des ressources --------
+
 def extraire_ressources(video_path: str, debut: int, fin: int, base_court: str, options: dict, utiliser_intervalle: bool):
     try:
         ffmpeg = tl.chemin_ffmpeg()
@@ -385,7 +394,7 @@ def extraire_ressources(video_path: str, debut: int, fin: int, base_court: str, 
 
     return None
 
-# ---------------- Interface utilisateur ----------------
+# -------- Interface utilisateur --------
 
 st.title("Extraction multimédia (vidéo, audio, images)")
 st.markdown("**[www.codeandcortex.fr](http://www.codeandcortex.fr)**")
@@ -407,11 +416,8 @@ with st.expander("Diagnostic système"):
             st.code(ver.stdout.splitlines()[0])
     except Exception as e:
         st.write(f"ffmpeg : introuvable ({e})")
-    # état cookies
     try:
-        import cookies as _ckdiag
-        from pathlib import Path as _Path
-        st.write(_ckdiag.info_cookies(_Path("/tmp/appdata/fichiers")))
+        st.write(ck.info_cookies(REPERTOIRE_SORTIE))
     except Exception:
         pass
 
@@ -444,15 +450,14 @@ with c4: opt_img1 = st.checkbox("Img 1 FPS", key="opt_img1")
 with c5: opt_img25 = st.checkbox("Img 25 FPS", key="opt_img25")
 with c6: opt_timelapse = st.checkbox("Timelapse", key="opt_timelapse")
 
-# Exclusivité claire : si timelapse est coché, on nettoie l’état des autres cases
+# Exclusivité SANS modifier session_state : on calcule des options effectives
 if opt_timelapse:
-    for k in ("opt_mp4", "opt_mp3", "opt_wav", "opt_img1", "opt_img25"):
-        if st.session_state.get(k):
-            st.session_state[k] = False
-    st.info("Mode timelapse activé : l’application n’affichera aucune vidéo. Elle générera uniquement le fichier timelapse à télécharger.")
+    st.info("Mode timelapse activé : aucune prévisualisation, l’application génère uniquement le fichier timelapse à télécharger.")
     fps_timelapse = st.selectbox("FPS timelapse", [4, 6, 8, 10, 12, 14, 16], index=2, key="fps_timelapse")
+    eff_opt = {"timelapse": True, "mp4": False, "mp3": False, "wav": False, "img1": False, "img25": False}
 else:
     fps_timelapse = 12
+    eff_opt = {"timelapse": False, "mp4": opt_mp4, "mp3": opt_mp3, "wav": opt_wav, "img1": opt_img1, "img25": opt_img25}
 
 st.subheader("Étendue")
 etendue = st.radio("Choisir l’étendue", ["Toute la vidéo", "Intervalle personnalisé"], index=0)
@@ -467,9 +472,9 @@ if etendue == "Intervalle personnalisé":
 else:
     utiliser_intervalle = False
 
-# Aperçu vidéo uniquement si timelapse n’est pas sélectionné
-afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=opt_timelapse)
-if afficher_apercu and not opt_timelapse:
+# Aperçu vidéo uniquement si pas de timelapse
+afficher_apercu = st.checkbox("Afficher l’aperçu vidéo", value=True, disabled=eff_opt["timelapse"])
+if afficher_apercu and not eff_opt["timelapse"]:
     if st.session_state.get('video_base') and Path(st.session_state['video_base']).exists():
         size = taille_fichier(Path(st.session_state['video_base'])) or 0
         if size <= SEUIL_APERCU_OCTETS:
@@ -497,13 +502,13 @@ if afficher_apercu and not opt_timelapse:
     elif url:
         st.info("Aperçu indisponible pour une URL tant que le traitement n’a pas été lancé.")
 
-# Bouton unique
+# ---- Bouton unique ----
 if st.button("Lancer le traitement"):
     with st.spinner("Traitement en cours..."):
         if not ffmpeg_disponible():
             st.error("ffmpeg introuvable et fallback impossible (réseau bloqué ?). Ajoute 'imageio-ffmpeg' dans requirements.txt ou autorise le réseau.")
         else:
-            # Préparation de la vidéo de base
+            # Préparation vidéo de base (depuis URL ou local)
             if url:
                 video_base, base_court, info, err = telecharger_preparer_video(
                     url, cookies_path_eff, mode_verbose, qualite, utiliser_intervalle,
@@ -534,7 +539,7 @@ if st.button("Lancer le traitement"):
                 base_court = st.session_state['base_court']
                 video_path = st.session_state['video_base']
 
-                if st.session_state.get("opt_timelapse", False):
+                if eff_opt["timelapse"]:
                     try:
                         intervalle = (st.session_state["debut_secs"], st.session_state["fin_secs"]) if utiliser_intervalle else None
                         job_id = hash_job(f"file:{video_path}", st.session_state.get("fps_timelapse", 12), intervalle)
@@ -557,11 +562,11 @@ if st.button("Lancer le traitement"):
                         debut_eff, fin_eff = 0, duree
 
                     options = {
-                        "mp4": st.session_state.get("opt_mp4", False),
-                        "mp3": st.session_state.get("opt_mp3", False),
-                        "wav": st.session_state.get("opt_wav", False),
-                        "img1": st.session_state.get("opt_img1", False),
-                        "img25": st.session_state.get("opt_img25", False)
+                        "mp4": eff_opt["mp4"],
+                        "mp3": eff_opt["mp3"],
+                        "wav": eff_opt["wav"],
+                        "img1": eff_opt["img1"],
+                        "img25": eff_opt["img25"]
                     }
                     if any(options.values()):
                         err2 = extraire_ressources(video_path, debut_eff, fin_eff, base_court, options, utiliser_intervalle)
