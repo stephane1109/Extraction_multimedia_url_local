@@ -216,19 +216,33 @@ def telecharger_preparer_video(url: str, cookies_path: Path | None, verbose: boo
         ydl_opts['download_sections'] = [{'section': f"*{debut}-{fin}"}]
         ydl_opts['force_keyframes_at_cuts'] = True
 
+    def _telecharger(opts: Dict[str, Any]):
+        with YoutubeDL(opts) as ydl:
+            info_local = ydl.extract_info(url, download=True)
+            _ = ydl.prepare_filename(info_local)
+        return info_local
+
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            _ = ydl.prepare_filename(info)
+        info = _telecharger(ydl_opts)
     except Exception as e:
         msg = str(e) or repr(e)
         if "403" in msg or "Forbidden" in msg:
             if not cookies_path:
                 return None, None, None, "HTTP 403 détecté. La vidéo est restreinte. Fournis un cookies.txt (extension Firefox cookies.txt) puis relance."
             return None, None, None, "HTTP 403 persistant malgré cookies. Vérifie le cookies.txt."
-        if "Requested format is not available" in msg:
-            return None, None, None, "La plateforme ne propose pas le format restreint demandé. Le format universel a été activé, réessaie."
-        return None, None, None, msg
+        if "Requested format is not available" in msg or "format not available" in msg.lower():
+            # Fallback automatique : on force un format universel et on retente immédiatement.
+            st.info("Format restreint indisponible, tentative avec le format universel.")
+            ydl_opts_fallback = dict(ydl_opts)
+            ydl_opts_fallback['format'] = 'bestvideo*+bestaudio/bestaudio/best'
+            ydl_opts_fallback.pop('merge_output_format', None)
+            try:
+                info = _telecharger(ydl_opts_fallback)
+            except Exception as e2:
+                msg2 = str(e2) or repr(e2)
+                return None, None, None, f"Echec du fallback universel : {msg2}"
+        else:
+            return None, None, None, msg
 
     # Récupérer le dernier fichier téléchargé (peut être .webm/.mkv/.mp4/.m4a)
     candidats = []
