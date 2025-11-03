@@ -231,16 +231,28 @@ def telecharger_preparer_video(url: str, cookies_path: Path | None, verbose: boo
                 return None, None, None, "HTTP 403 détecté. La vidéo est restreinte. Fournis un cookies.txt (extension Firefox cookies.txt) puis relance."
             return None, None, None, "HTTP 403 persistant malgré cookies. Vérifie le cookies.txt."
         if "Requested format is not available" in msg or "format not available" in msg.lower():
-            # Fallback automatique : on force un format universel et on retente immédiatement.
-            st.info("Format restreint indisponible, tentative avec le format universel.")
-            ydl_opts_fallback = dict(ydl_opts)
-            ydl_opts_fallback['format'] = 'bestvideo*+bestaudio/bestaudio/best'
-            ydl_opts_fallback.pop('merge_output_format', None)
-            try:
-                info = _telecharger(ydl_opts_fallback)
-            except Exception as e2:
-                msg2 = str(e2) or repr(e2)
-                return None, None, None, f"Echec du fallback universel : {msg2}"
+            st.info("Format restreint indisponible, tentative avec d'autres formats.")
+            formats_alternatifs = [
+                'bestvideo+bestaudio/best',
+                'best',
+                'bestaudio/best'
+            ]
+            erreurs_fallback: List[str] = []
+            info = None
+            for fmt in formats_alternatifs:
+                if fmt == ydl_opts.get('format'):
+                    continue
+                ydl_opts_fallback = dict(ydl_opts)
+                ydl_opts_fallback['format'] = fmt
+                ydl_opts_fallback.pop('merge_output_format', None)
+                try:
+                    info = _telecharger(ydl_opts_fallback)
+                    break
+                except Exception as e2:
+                    erreurs_fallback.append(str(e2) or repr(e2))
+            if info is None:
+                detail_erreur = " | ".join(erreurs_fallback) or msg
+                return None, None, None, f"Echec du fallback universel : {detail_erreur}"
         else:
             return None, None, None, msg
 
